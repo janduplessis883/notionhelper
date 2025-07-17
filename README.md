@@ -45,71 +45,86 @@ Here is an example of how to use the library:
 ```python
 import os
 from notionhelper import NotionHelper
+```
 
-def main():
-    # Initialize the client with your Notion token
-    notion_token = os.getenv("NOTION_TOKEN")
-    if not notion_token:
-        raise ValueError("NOTION_TOKEN environment variable not set.")
+### Initialize the NotionHelper class
 
-    helper = NotionHelper(notion_token)
+```python
+notion_token = os.getenv("NOTION_TOKEN")
 
-    # --- Example: Retrieve a Database ---
-    database_id = "your_database_id"
-    database_schema = helper.get_database(database_id)
-    print("Successfully retrieved database schema:")
-    # print(database_schema)
+helper = NotionHelper(notion_token)
+```
 
+### Retrieve a Database
 
-    # --- Example: Create a New Page in a Database ---
-    page_properties = {
-        "Name": {
-            "title": [
+```python
+database_id = "your_database_id"
+database_schema = helper.get_database(database_id)
+print(database_schema)
+```
+
+### Create a New Page in a Database
+
+```python
+page_properties = {
+    "Name": {
+        "title": [
+            {
+                "text": {
+                    "content": "New Page from NotionHelper"
+                }
+            }
+        ]
+    }
+}
+new_page = helper.new_page_to_db(database_id, page_properties)
+print(new_page)
+```
+
+### Append Content to the New Page
+
+```python
+blocks = [
+    {
+        "object": "block",
+        "type": "heading_2",
+        "heading_2": {
+            "rich_text": [{"type": "text", "text": {"content": "Hello from NotionHelper!"}}]
+        }
+    },
+    {
+        "object": "block",
+        "type": "paragraph",
+        "paragraph": {
+            "rich_text": [
                 {
+                    "type": "text",
                     "text": {
-                        "content": "New Page from NotionHelper"
+                        "content": "This content was appended synchronously."
                     }
                 }
             ]
         }
     }
-    new_page = helper.new_page_to_db(database_id, page_properties)
-    print(f"Successfully created a new page with ID: {new_page['id']}")
-    page_id = new_page['id']
+]
+helper.append_page_body(page_id, blocks)
+print(f"Successfully appended content to page ID: {page_id}")
+```
 
-    # --- Example: Append Content to the New Page ---
-    blocks = [
-        {
-            "object": "block",
-            "type": "heading_2",
-            "heading_2": {
-                "rich_text": [{"type": "text", "text": {"content": "Hello from NotionHelper!"}}]
-            }
-        },
-        {
-            "object": "block",
-            "type": "paragraph",
-            "paragraph": {
-                "rich_text": [
-                    {
-                        "type": "text",
-                        "text": {
-                            "content": "This content was appended synchronously."
-                        }
-                    }
-                ]
-            }
-        }
-    ]
-    helper.append_page_body(page_id, blocks)
-    print(f"Successfully appended content to page ID: {page_id}")
+### Get all pages as a Pandas DataFrame
 
+```python
+  df = helper.get_all_pages_as_dataframe(database_id)
+  print(df.head())
+```
 
-    # --- Example: Get all pages as a Pandas DataFrame ---
-    df = helper.get_all_pages_as_dataframe(database_id)
-    print("Successfully retrieved pages as a DataFrame:")
-    print(df.head())
+### Upload a File and Attach to a Page
 
-
-if __name__ == "__main__":
-    main()
+```python
+file_path = "path/to/your/file.pdf"  # Replace with your file path
+upload_response = helper.upload_file(file_path)
+file_upload_id = upload_response["id"]
+# Replace with your page_id
+page_id = "your_page_id"
+attach_response = helper.attach_file_to_page(page_id, file_upload_id)
+print(f"Successfully uploaded and attached file: {attach_response}")
