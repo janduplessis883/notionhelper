@@ -1,0 +1,19 @@
+[project]
+name = "notionhelper"
+version = "0.1.0"
+description = "Add your description here"
+readme = "README.md"
+authors = [
+    { name = "Jan du Plessis", email = "drjanduplessis@icloud.com" }
+]
+requires-python = ">=3.12"
+dependencies = [
+    "mimetype>=0.1.5",
+    "notion-client>=2.4.0",
+    "pandas>=2.3.1",
+    "requests>=2.32.4",
+]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
