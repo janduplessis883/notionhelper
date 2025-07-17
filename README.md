@@ -1,10 +1,12 @@
 # NotionHelper
 
+![NotionHelper]()
+
 `NotionHelper` is a Python library that provides a convenient interface for interacting with the Notion API. It simplifies common tasks such as managing databases, pages, and file uploads, allowing you to integrate Notion's powerful features into your applications with ease.
 
 For help constructing the JSON for the properties, use the [Notion API - JSON Builder](https://notioinapiassistant.streamlit.app) Streamlit app.
 
-![JSON Builder](images/json_builder.png)
+![JSON Builder](https://github.com/janduplessis883/notionhelper/blob/master/images/json_builder.png.png?raw=true)
 
 ## Features
 
