@@ -1,6 +1,6 @@
 # NotionHelper
 
-![NotionHelper]()
+![NotionHelper](https://github.com/janduplessis883/notionhelper/blob/master/images/helper_logo.png?raw=true)
 
 `NotionHelper` is a Python library that provides a convenient interface for interacting with the Notion API. It simplifies common tasks such as managing databases, pages, and file uploads, allowing you to integrate Notion's powerful features into your applications with ease.
 
