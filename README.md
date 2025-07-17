@@ -6,8 +6,6 @@
 
 For help constructing the JSON for the properties, use the [Notion API - JSON Builder](https://notioinapiassistant.streamlit.app) Streamlit app.
 
-![JSON Builder](https://github.com/janduplessis883/notionhelper/blob/master/images/json_builder.png.png?raw=true)
-
 ## Features
 
 -   **Synchronous Operations**: Uses `notion-client` and `requests` for straightforward API interactions.
