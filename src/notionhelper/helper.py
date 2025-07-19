@@ -475,3 +475,60 @@ class NotionHelper:
 
         # Attach the file to the page property
         return self.attach_file_to_page_property(page_id, property_name, file_upload_id, file_name)
+
+    def info(self):
+        """Displays comprehensive library information in a Jupyter notebook.
+
+        Shows:
+        - Library name and description
+        - Complete list of all available methods with descriptions
+        - Version information
+        - Optional logo display (if available)
+
+        Returns:
+            IPython.display.HTML: An HTML display object or None if IPython is not available.
+        """
+        try:
+            from IPython.display import HTML
+            import base64
+            import inspect
+
+            # Get logo image data
+            logo_path = os.path.join(os.path.dirname(__file__), '../images/helper_logo.png')
+            if os.path.exists(logo_path):
+                with open(logo_path, "rb") as image_file:
+                    encoded_logo = base64.b64encode(image_file.read()).decode('utf-8')
+            else:
+                encoded_logo = ""
+
+            # Get all methods and their docstrings
+            methods = []
+            for name, method in inspect.getmembers(self, predicate=inspect.ismethod):
+                if not name.startswith('_'):
+                    doc = inspect.getdoc(method) or "No description available"
+                    methods.append(f"<li><code>{name}()</code>: {doc.splitlines()[0]}</li>")
+
+            # Create HTML content
+            html_content = f"""
+            <div style="font-family: 'Inter', -apple-system, BlinkMacSystemFont, sans-serif; max-width: 800px; margin: 0 auto; color: #1e293b;">
+                <h1 style="color: #1e293b;">NotionHelper Library</h1>
+                {f'<img src="data:image/png;base64,{encoded_logo}" style="max-width: 200px; margin: 20px 0; display: block;">' if encoded_logo else ''}
+                <p style="font-size: 1.1rem;">A Python helper class for interacting with the Notion API.</p>
+                <h3 style="color: #1e293b;">All Available Methods:</h3>
+                <ul style="list-style-type: none; padding-left: 0;">
+                    {''.join(methods)}
+                </ul>
+                <h3 style="color: #1e293b;">Features:</h3>
+                <ul style="list-style-type: none; padding-left: 0;">
+                    <li style="margin-bottom: 8px;">Database querying and manipulation</li>
+                    <li style="margin-bottom: 8px;">Page creation and editing</li>
+                    <li style="margin-bottom: 8px;">File uploads and attachments</li>
+                    <li style="margin-bottom: 8px;">Data conversion to Pandas DataFrames</li>
+                </ul>
+                <p style="font-size: 0.9rem; color: #64748b;">Version: {getattr(self, '__version__', '1.0.0')}</p>
+            </div>
+            """
+            return HTML(html_content)
+        except ImportError:
+            print("IPython is required for this functionality. Please install it with: pip install ipython")
+            return None

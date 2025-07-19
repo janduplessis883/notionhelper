@@ -128,3 +128,48 @@ file_upload_id = upload_response["id"]
 page_id = "your_page_id"
 attach_response = helper.attach_file_to_page(page_id, file_upload_id)
 print(f"Successfully uploaded and attached file: {attach_response}")
+```
+
+### Simplified File Operations
+
+NotionHelper provides convenient one-step methods that combine file upload and attachment operations:
+
+#### one_step_image_embed()
+Uploads an image and embeds it in a Notion page in a single call, combining what would normally require:
+1. Uploading the file
+2. Embedding it in the page
+
+```python
+page_id = "your_page_id"
+image_path = "path/to/image.png"
+response = helper.one_step_image_embed(page_id, image_path)
+print(f"Successfully embedded image: {response}")
+```
+
+#### one_step_file_to_page()
+Uploads a file and attaches it to a Notion page in one step, combining:
+1. Uploading the file
+2. Attaching it to the page
+
+```python
+page_id = "your_page_id"
+file_path = "path/to/document.pdf"
+response = helper.one_step_file_to_page(page_id, file_path)
+print(f"Successfully attached file: {response}")
+```
+
+#### one_step_file_to_page_property()
+Uploads a file and attaches it to a specific Files & Media property on a page, combining:
+1. Uploading the file
+2. Attaching it to the page property
+
+```python
+page_id = "your_page_id"
+property_name = "Files"  # Name of your Files & Media property
+file_path = "path/to/document.pdf"
+file_name = "Custom Display Name.pdf"  # Optional display name
+response = helper.one_step_file_to_page_property(page_id, property_name, file_path, file_name)
+print(f"Successfully attached file to property: {response}")
+```
+
+These methods handle all the intermediate steps automatically, making file operations with Notion much simpler.
