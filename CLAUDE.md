@@ -10,12 +10,15 @@ NotionHelper is a Python library that provides a convenient interface for intera
 
 ### Package Management
 - Uses `uv` for dependency management (see `uv.lock`)
-- Install dependencies: `uv install` or `uv sync`
+- Install dependencies: `uv sync` or `uv sync --extra dev`
 - Build package: `uv build`
 
 ### Testing
-- No specific test framework is currently configured in the project
-- To run tests, check if pytest or similar is available: `python -m pytest` or `uv run pytest`
+- Full pytest test suite with 21 tests covering all major functionality
+- Run tests: `uv run pytest`
+- Run with coverage: `uv run pytest --cov=src/notionhelper --cov-report=term-missing`
+- Test configuration in `pytest.ini` and `pyproject.toml`
+- Install test dependencies: `uv sync --extra test`
 
 ## Architecture
 
