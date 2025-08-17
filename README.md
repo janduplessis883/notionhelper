@@ -188,6 +188,39 @@ The NotionHelper library includes several quality improvements:
 - **Clean Imports**: Explicit imports with `__all__` declaration for better namespace management
 - **Production Ready**: Removed debug output and implemented proper error reporting
 
+## Complete Function Reference
+
+The `NotionHelper` class provides the following methods:
+
+### Database Operations
+- **`get_database(database_id)`** - Retrieves the schema of a Notion database
+- **`create_database(parent_page_id, database_title, properties)`** - Creates a new database under a parent page
+- **`notion_search_db(database_id, query="")`** - Searches for pages in a database containing the query in their title
+
+### Page Operations  
+- **`new_page_to_db(database_id, page_properties)`** - Adds a new page to a database with specified properties
+- **`append_page_body(page_id, blocks)`** - Appends blocks of content to the body of a page
+- **`notion_get_page(page_id)`** - Retrieves page properties and content blocks as JSON
+
+### Data Retrieval & Conversion
+- **`get_all_page_ids(database_id)`** - Returns IDs of all pages in a database
+- **`get_all_pages_as_json(database_id, limit=None)`** - Returns all pages as JSON objects with properties
+- **`get_all_pages_as_dataframe(database_id, limit=None, include_page_ids=True)`** - Converts database pages to a Pandas DataFrame
+
+### File Operations
+- **`upload_file(file_path)`** - Uploads a file to Notion and returns the file upload object
+- **`attach_file_to_page(page_id, file_upload_id)`** - Attaches an uploaded file to a specific page
+- **`embed_image_to_page(page_id, file_upload_id)`** - Embeds an uploaded image into a page
+- **`attach_file_to_page_property(page_id, property_name, file_upload_id, file_name)`** - Attaches a file to a Files & Media property
+
+### One-Step Convenience Methods
+- **`one_step_image_embed(page_id, file_path)`** - Uploads and embeds an image in one operation
+- **`one_step_file_to_page(page_id, file_path)`** - Uploads and attaches a file to a page in one operation  
+- **`one_step_file_to_page_property(page_id, property_name, file_path, file_name)`** - Uploads and attaches a file to a page property in one operation
+
+### Utility Methods
+- **`info()`** - Displays comprehensive library information with all available methods (Jupyter notebook compatible)
+
 ## Requirements
 
 - Python 3.10+
