@@ -1,6 +1,5 @@
-import notion_client
+from typing import Optional, Dict, List, Any
 from notion_client import Client
-import pprint
 import pandas as pd
 import os
 import requests
@@ -61,13 +60,13 @@ class NotionHelper:
         Attaches a file to a Files & Media property on a specific page.
     """
 
-    def __init__(self, notion_token):
+    def __init__(self, notion_token: str):
         """Initializes the NotionHelper instance and authenticates with the Notion API
         using the provided token."""
         self.notion_token = notion_token
         self.notion = Client(auth=self.notion_token)
 
-    def get_database(self, database_id):
+    def get_database(self, database_id: str) -> Dict[str, Any]:
         """Retrieves the schema of a Notion database given its database_id.
 
         Parameters
@@ -80,12 +79,15 @@ class NotionHelper:
         dict
             A dictionary representing the database schema.
         """
-        response = self.notion.databases.retrieve(database_id=database_id)
-        return response
+        try:
+            response = self.notion.databases.retrieve(database_id=database_id)
+            return response
+        except Exception as e:
+            raise Exception(f"Failed to retrieve database {database_id}: {str(e)}")
 
     def notion_search_db(
-        self, database_id="e18e2d110f9e401eb1adf3190e51a21b", query=""
-    ):
+        self, database_id: str, query: str = ""
+    ) -> None:
         """Searches for pages in a Notion database that contain the specified query in their title."""
         my_pages = self.notion.databases.query(
             database_id=database_id,
@@ -115,7 +117,7 @@ class NotionHelper:
 
         # pprint.pprint(page)
 
-    def notion_get_page(self, page_id):
+    def notion_get_page(self, page_id: str) -> Dict[str, Any]:
         """Retrieves the JSON of the page properties and an array of blocks on a Notion page given its page_id."""
 
         # Retrieve the page and block data
@@ -132,7 +134,7 @@ class NotionHelper:
         # Return the properties JSON and blocks content
         return {"properties": properties, "content": content}
 
-    def create_database(self, parent_page_id, database_title, properties):
+    def create_database(self, parent_page_id: str, database_title: str, properties: Dict[str, Any]) -> Dict[str, Any]:
         """Creates a new database in Notion.
 
         This method creates a new database under a specified parent page with the provided title and property definitions.
@@ -156,7 +158,7 @@ class NotionHelper:
         response = self.notion.databases.create(**new_database)
         return response
 
-    def new_page_to_db(self, database_id, page_properties):
+    def new_page_to_db(self, database_id: str, page_properties: Dict[str, Any]) -> Dict[str, Any]:
         """Adds a new page to a Notion database."""
 
         new_page = {
@@ -167,7 +169,7 @@ class NotionHelper:
         response = self.notion.pages.create(**new_page)
         return response
 
-    def append_page_body(self, page_id, blocks):
+    def append_page_body(self, page_id: str, blocks: List[Dict[str, Any]]) -> Dict[str, Any]:
         """Appends blocks of text to the body of a Notion page."""
 
         new_blocks = {"children": blocks}
@@ -175,14 +177,14 @@ class NotionHelper:
         response = self.notion.blocks.children.append(block_id=page_id, **new_blocks)
         return response
 
-    def get_all_page_ids(self, database_id):
+    def get_all_page_ids(self, database_id: str) -> List[str]:
         """Returns the IDs of all pages in a given database."""
 
         my_pages = self.notion.databases.query(database_id=database_id)
         page_ids = [page["id"] for page in my_pages["results"]]
         return page_ids
 
-    def get_all_pages_as_json(self, database_id, limit=None):
+    def get_all_pages_as_json(self, database_id: str, limit: Optional[int] = None) -> List[Dict[str, Any]]:
         """Returns a list of JSON objects representing all pages in the given database, with all properties.
         You can specify the number of entries to be loaded using the `limit` parameter.
         """
@@ -211,7 +213,7 @@ class NotionHelper:
 
         return pages_json
 
-    def get_all_pages_as_dataframe(self, database_id, limit=None, include_page_ids=True):
+    def get_all_pages_as_dataframe(self, database_id: str, limit: Optional[int] = None, include_page_ids: bool = True) -> pd.DataFrame:
         """Retrieves all pages from a Notion database and returns them as a Pandas DataFrame.
 
         This method collects pages from the specified Notion database, optionally including the page IDs,
@@ -348,31 +350,41 @@ class NotionHelper:
         pd.options.display.float_format = "{:.3f}".format
         return df
 
-    def upload_file(self, file_path):
+    def upload_file(self, file_path: str) -> Dict[str, Any]:
         """Uploads a file to Notion and returns the file upload object."""
-        # Step 1: Create a File Upload object
-        create_upload_url = "https://api.notion.com/v1/file_uploads"
-        headers = {
-            "Authorization": f"Bearer {self.notion_token}",
-            "Content-Type": "application/json",
-            "Notion-Version": "2022-06-28",
-        }
-        response = requests.post(create_upload_url, headers=headers, json={})
-        upload_data = response.json()
-        upload_url = upload_data["upload_url"]
-
-        # Step 2: Upload file contents
-        with open(file_path, "rb") as f:
-            upload_headers = {
+        if not os.path.exists(file_path):
+            raise FileNotFoundError(f"File not found: {file_path}")
+            
+        try:
+            # Step 1: Create a File Upload object
+            create_upload_url = "https://api.notion.com/v1/file_uploads"
+            headers = {
                 "Authorization": f"Bearer {self.notion_token}",
+                "Content-Type": "application/json",
                 "Notion-Version": "2022-06-28",
             }
-            files = {'file': (os.path.basename(file_path), f, mimetypes.guess_type(file_path)[0] or 'application/octet-stream')}
-            upload_response = requests.post(upload_url, headers=upload_headers, files=files)
+            response = requests.post(create_upload_url, headers=headers, json={})
+            response.raise_for_status()
+            upload_data = response.json()
+            upload_url = upload_data["upload_url"]
 
-        return upload_response.json()
+            # Step 2: Upload file contents
+            with open(file_path, "rb") as f:
+                upload_headers = {
+                    "Authorization": f"Bearer {self.notion_token}",
+                    "Notion-Version": "2022-06-28",
+                }
+                files = {'file': (os.path.basename(file_path), f, mimetypes.guess_type(file_path)[0] or 'application/octet-stream')}
+                upload_response = requests.post(upload_url, headers=upload_headers, files=files)
+                upload_response.raise_for_status()
 
-    def attach_file_to_page(self, page_id, file_upload_id):
+            return upload_response.json()
+        except requests.RequestException as e:
+            raise Exception(f"Failed to upload file {file_path}: {str(e)}")
+        except Exception as e:
+            raise Exception(f"Error uploading file {file_path}: {str(e)}")
+
+    def attach_file_to_page(self, page_id: str, file_upload_id: str) -> Dict[str, Any]:
         """Attaches an uploaded file to a specific page."""
         attach_url = f"https://api.notion.com/v1/blocks/{page_id}/children"
         headers = {
@@ -396,7 +408,7 @@ class NotionHelper:
         response = requests.patch(attach_url, headers=headers, json=data)
         return response.json()
 
-    def embed_image_to_page(self, page_id, file_upload_id):
+    def embed_image_to_page(self, page_id: str, file_upload_id: str) -> Dict[str, Any]:
         """Embeds an uploaded image to a specific page."""
         attach_url = f"https://api.notion.com/v1/blocks/{page_id}/children"
         headers = {
@@ -421,8 +433,8 @@ class NotionHelper:
         return response.json()
 
     def attach_file_to_page_property(
-        self, page_id, property_name, file_upload_id, file_name
-    ):
+        self, page_id: str, property_name: str, file_upload_id: str, file_name: str
+    ) -> Dict[str, Any]:
         """Attaches a file to a Files & Media property on a specific page."""
         update_url = f"https://api.notion.com/v1/pages/{page_id}"
         headers = {
@@ -446,7 +458,7 @@ class NotionHelper:
         response = requests.patch(update_url, headers=headers, json=data)
         return response.json()
 
-    def one_step_image_embed(self, page_id, file_path):
+    def one_step_image_embed(self, page_id: str, file_path: str) -> Dict[str, Any]:
         """Uploads an image and embeds it in a Notion page in one step."""
 
         # Upload the file
@@ -456,7 +468,7 @@ class NotionHelper:
         # Embed the image in the page
         return self.embed_image_to_page(page_id, file_upload_id)
 
-    def one_step_file_to_page(self, page_id, file_path):
+    def one_step_file_to_page(self, page_id: str, file_path: str) -> Dict[str, Any]:
         """Uploads a file and attaches it to a Notion page in one step."""
 
         # Upload the file
@@ -466,7 +478,7 @@ class NotionHelper:
         # Attach the file to the page
         return self.attach_file_to_page(page_id, file_upload_id)
 
-    def one_step_file_to_page_property(self, page_id, property_name, file_path, file_name):
+    def one_step_file_to_page_property(self, page_id: str, property_name: str, file_path: str, file_name: str) -> Dict[str, Any]:
         """Uploads a file and attaches it to a Notion page property in one step."""
 
         # Upload the file
@@ -476,7 +488,7 @@ class NotionHelper:
         # Attach the file to the page property
         return self.attach_file_to_page_property(page_id, property_name, file_upload_id, file_name)
 
-    def info(self):
+    def info(self) -> Optional[Any]:
         """Displays comprehensive library information in a Jupyter notebook.
 
         Shows:
