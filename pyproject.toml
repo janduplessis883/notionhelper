@@ -1,7 +1,7 @@
 [project]
 name = "notionhelper"
-version = "0.1.7"
-description = "Add your description here"
+version = "0.2.1"
+description = "NotionHelper is a Python library that simplifies interactions with the Notion API, enabling easy management of databases, pages, and files within Notion workspaces."
 readme = "README.md"
 authors = [
     { name = "Jan du Plessis", email = "drjanduplessis@icloud.com" }
@@ -9,6 +9,7 @@ authors = [
 requires-python = ">=3.10"
 dependencies = [
     "mimetype>=0.1.5",
+    "notebook>=7.4.5",
     "notion-client>=2.4.0",
     "pandas>=2.3.1",
     "requests>=2.32.4",
@@ -26,7 +27,7 @@ python_functions = "test_*"
 addopts = [
     "--verbose",
     "--strict-markers",
-    "--strict-config", 
+    "--strict-config",
     "--tb=short",
     "--cov=src/notionhelper",
     "--cov-report=term-missing",
@@ -36,7 +37,7 @@ addopts = [
 ]
 markers = [
     "unit: Unit tests",
-    "integration: Integration tests", 
+    "integration: Integration tests",
     "slow: Slow tests that may take longer to run",
     "network: Tests that require network access (normally mocked)"
 ]
@@ -54,7 +55,7 @@ test = [
 ]
 dev = [
     "pytest>=7.0.0",
-    "pytest-cov>=4.0.0", 
+    "pytest-cov>=4.0.0",
     "pytest-mock>=3.10.0",
     "pytest-asyncio>=0.21.0",
     "black>=23.0.0",

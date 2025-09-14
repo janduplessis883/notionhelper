@@ -2,7 +2,7 @@
 
 ![NotionHelper](https://github.com/janduplessis883/notionhelper/blob/master/images/helper_logo.png?raw=true)
 
-`NotionHelper` is a Python library that provides a convenient interface for interacting with the Notion API. It simplifies common tasks such as managing databases, pages, and file uploads, allowing you to integrate Notion's powerful features into your applications with ease.
+`NotionHelper` is a Python library that provides a convenient interface for interacting with the Notion API, specifically designed to leverage the **Notion API Version 2025-09-03**. It simplifies common tasks such as managing databases, data sources, pages, and file uploads, allowing you to integrate Notion's powerful features into your applications with ease.
 
 For help constructing the JSON for the properties, use the [Notion API - JSON Builder](https://notioinapiassistant.streamlit.app) Streamlit app.
 
@@ -11,10 +11,11 @@ For help constructing the JSON for the properties, use the [Notion API - JSON Bu
 -   **Synchronous Operations**: Uses `notion-client` and `requests` for straightforward API interactions.
 -   **Type Safety**: Full type hints for all methods ensuring better development experience and IDE support.
 -   **Error Handling**: Robust error handling for API calls and file operations.
--   **Database Management**: Create, query, and retrieve Notion databases.
--   **Page Operations**: Add new pages to databases and append content to existing pages.
+-   **Database & Data Source Management**: Create, retrieve, query, and update Notion databases and their associated data sources.
+-   **Page Operations**: Add new pages to data sources and append content to existing pages.
 -   **File Handling**: Upload files and attach them to pages or page properties with built-in validation.
--   **Pandas Integration**: Convert Notion database pages into a Pandas DataFrame for easy data manipulation.
+-   **Pandas Integration**: Convert Notion data source pages into a Pandas DataFrame for easy data manipulation.
+-   **API Version 2025-09-03 Compliance**: Fully updated to support the latest Notion API changes, including the separation of databases and data sources.
 
 ## Installation
 
@@ -57,29 +58,52 @@ notion_token = os.getenv("NOTION_TOKEN")
 helper = NotionHelper(notion_token)
 ```
 
-### Retrieve a Database
+### Retrieve a Database (Container)
+
+With API version `2025-09-03`, `get_database` now returns the database object, which acts as a container for one or more data sources. To get the actual schema (properties), you need to retrieve a specific data source using `get_data_source`.
 
 ```python
-database_id = "your_database_id"
-database_schema = helper.get_database(database_id)
-print(database_schema)
+database_id = "your_database_id" # ID of the database container
+database_object = helper.get_database(database_id)
+print(database_object)
+
+# To get the schema of a specific data source within this database:
+data_source_id = database_object["data_sources"][0]["id"] # Get the ID of the first data source
+data_source_schema = helper.get_data_source(data_source_id)
+print(data_source_schema)
 ```
 
-### Create a New Page in a Database
+### Create a New Page in a Data Source
+
+With API version `2025-09-03`, pages are parented by `data_source_id`, not `database_id`. When creating a new page, ensure you use the `data_source_id` of the specific table you want to add the page to.
+
+**Important Note on Property Definitions:** When defining properties for the *schema* of a database or data source, use an empty object `{}` for the property type (e.g., `"My Title Column": {"title": {}}`). However, when defining properties for a *new page* (as shown below), you provide the actual content using rich text arrays or other specific property value objects.
 
 ```python
+data_source_id = "your_data_source_id" # The ID of the specific data source (table)
+
 page_properties = {
-    "Name": {
+    "Task Name": { # This must match a 'title' property in your data source schema
         "title": [
             {
                 "text": {
-                    "content": "New Page from NotionHelper"
+                    "content": "New Task from NotionHelper"
                 }
             }
         ]
+    },
+    "Status": { # This must match a 'select' property in your data source schema
+        "select": {
+            "name": "Not Started" # Must be one of the options defined in your data source
+        }
+    },
+    "Due Date": { # This must match a 'date' property in your data source schema
+        "date": {
+            "start": "2025-12-31"
+        }
     }
 }
-new_page = helper.new_page_to_db(database_id, page_properties)
+new_page = helper.new_page_to_data_source(data_source_id, page_properties)
 print(new_page)
 ```
 
@@ -113,11 +137,69 @@ helper.append_page_body(page_id, blocks)
 print(f"Successfully appended content to page ID: {page_id}")
 ```
 
-### Get all pages as a Pandas DataFrame
+### Get all pages from a Data Source as a Pandas DataFrame
 
 ```python
-  df = helper.get_all_pages_as_dataframe(database_id)
-  print(df.head())
+data_source_id = "your_data_source_id" # The ID of the specific data source (table)
+df = helper.get_data_source_pages_as_dataframe(data_source_id)
+print(df.head())
+```
+
+### Update a Data Source
+
+This example demonstrates how to update the schema (properties/columns), title, icon, or other attributes of an existing data source.
+
+```python
+data_source_id = "your_data_source_id" # The ID of the data source to update
+
+# Example 1: Rename a property and add a new one
+update_payload_1 = {
+    "properties": {
+        "Old Property Name": { # Existing property name or ID
+            "name": "New Property Name" # New name for the property
+        },
+        "New Text Property": { # Add a new rich text property
+            "rich_text": {}
+        }
+    }
+}
+updated_data_source_1 = helper.update_data_source(data_source_id, properties=update_payload_1["properties"])
+print(f"Updated data source (rename and add): {updated_data_source_1}")
+
+# Example 2: Update data source title and remove a property
+update_payload_2 = {
+    "title": [
+        {
+            "type": "text",
+            "text": {
+                "content": "Updated Data Source Title"
+            }
+        }
+    ],
+    "properties": {
+        "Property To Remove": None # Set to None to remove a property
+    }
+}
+updated_data_source_2 = helper.update_data_source(data_source_id, title=update_payload_2["title"], properties=update_payload_2["properties"])
+print(f"Updated data source (title and remove): {updated_data_source_2}")
+
+# Example 3: Update a select property's options
+update_payload_3 = {
+    "properties": {
+        "Status": { # Assuming 'Status' is an existing select property
+            "select": {
+                "options": [
+                    {"name": "To Do", "color": "gray"},
+                    {"name": "In Progress", "color": "blue"},
+                    {"name": "Done", "color": "green"},
+                    {"name": "Blocked", "color": "red"} # Add a new option
+                ]
+            }
+        }
+    }
+}
+updated_data_source_3 = helper.update_data_source(data_source_id, properties=update_payload_3["properties"])
+print(f"Updated data source (select options): {updated_data_source_3}")
 ```
 
 ### Upload a File and Attach to a Page
@@ -192,20 +274,22 @@ The NotionHelper library includes several quality improvements:
 
 The `NotionHelper` class provides the following methods:
 
-### Database Operations
-- **`get_database(database_id)`** - Retrieves the schema of a Notion database
-- **`create_database(parent_page_id, database_title, properties)`** - Creates a new database under a parent page
-- **`notion_search_db(database_id, query="")`** - Searches for pages in a database containing the query in their title
+### Database & Data Source Operations
+- **`get_database(database_id)`** - Retrieves the database object (container), which includes a list of its data sources.
+- **`get_data_source(data_source_id)`** - Retrieves a specific data source, including its properties (schema).
+- **`create_database(parent_page_id, database_title, initial_data_source_properties, initial_data_source_title=None)`** - Creates a new database with an initial data source.
+- **`update_data_source(data_source_id, properties=None, title=None, icon=None, in_trash=None, parent=None)`** - Updates the attributes of a specified data source.
+- **`notion_search_db(query="", filter_object_type="page")`** - Searches for pages or data sources in Notion.
 
-### Page Operations  
-- **`new_page_to_db(database_id, page_properties)`** - Adds a new page to a database with specified properties
-- **`append_page_body(page_id, blocks)`** - Appends blocks of content to the body of a page
-- **`notion_get_page(page_id)`** - Retrieves page properties and content blocks as JSON
+### Page Operations
+- **`new_page_to_data_source(data_source_id, page_properties)`** - Adds a new page to a Notion data source with the specified properties.
+- **`append_page_body(page_id, blocks)`** - Appends blocks of text to the body of a Notion page.
+- **`get_page(page_id)`** - Retrieves the JSON of the page properties and an array of blocks on a Notion page given its page_id.
 
 ### Data Retrieval & Conversion
-- **`get_all_page_ids(database_id)`** - Returns IDs of all pages in a database
-- **`get_all_pages_as_json(database_id, limit=None)`** - Returns all pages as JSON objects with properties
-- **`get_all_pages_as_dataframe(database_id, limit=None, include_page_ids=True)`** - Converts database pages to a Pandas DataFrame
+- **`get_data_source_page_ids(data_source_id)`** - Returns the IDs of all pages in a given data source.
+- **`get_data_source_pages_as_json(data_source_id, limit=None)`** - Returns a list of JSON objects representing all pages in the given data source, with all properties.
+- **`get_data_source_pages_as_dataframe(data_source_id, limit=None, include_page_ids=True)`** - Retrieves all pages from a Notion data source and returns them as a Pandas DataFrame.
 
 ### File Operations
 - **`upload_file(file_path)`** - Uploads a file to Notion and returns the file upload object
@@ -215,16 +299,12 @@ The `NotionHelper` class provides the following methods:
 
 ### One-Step Convenience Methods
 - **`one_step_image_embed(page_id, file_path)`** - Uploads and embeds an image in one operation
-- **`one_step_file_to_page(page_id, file_path)`** - Uploads and attaches a file to a page in one operation  
+- **`one_step_file_to_page(page_id, file_path)`** - Uploads and attaches a file to a page in one operation
 - **`one_step_file_to_page_property(page_id, property_name, file_path, file_name)`** - Uploads and attaches a file to a page property in one operation
-
-### Utility Methods
-- **`info()`** - Displays comprehensive library information with all available methods (Jupyter notebook compatible)
 
 ## Requirements
 
 - Python 3.10+
-- notion-client >= 2.4.0
-- pandas >= 2.3.1  
+- pandas >= 2.3.1
 - requests >= 2.32.4
 - mimetype >= 0.1.5
