@@ -655,7 +655,51 @@ class NotionHelper:
         response = requests.patch(update_url, headers=headers, json=data)
         return response.json()
 
+    def dict_to_notion_schema(self, data: Dict[str, Any], title_key: str) -> Dict[str, Any]:
+        """Converts a dictionary into a Notion property schema for database creation.
+
+        Parameters:
+            data (dict): Dictionary containing sample values to infer types from.
+            title_key (str): The key that should be used as the title property.
+
+        Returns:
+            dict: A dictionary defining the Notion property schema.
+        """
+        properties = {}
+
+        for key, value in data.items():
+            # Handle NumPy types
+            if hasattr(value, "item"):
+                value = value.item()
+
+            # Debug output to help diagnose type issues
+            print(f"DEBUG: key='{key}', value={value}, type={type(value).__name__}, isinstance(bool)={isinstance(value, bool)}, isinstance(int)={isinstance(value, int)}")
+
+            if key == title_key:
+                properties[key] = {"title": {}}
+            # IMPORTANT: Check for bool BEFORE (int, float) because bool is a subclass of int in Python
+            elif isinstance(value, bool):
+                properties[key] = {"checkbox": {}}
+                print(f"  → Assigned as CHECKBOX")
+            elif isinstance(value, (int, float)):
+                properties[key] = {"number": {"format": "number"}}
+                print(f"  → Assigned as NUMBER")
+            else:
+                properties[key] = {"rich_text": {}}
+                print(f"  → Assigned as RICH_TEXT")
+
+        return properties
+
     def dict_to_notion_props(self, data: Dict[str, Any], title_key: str) -> Dict[str, Any]:
+        """Converts a dictionary into Notion property values for page creation.
+
+        Parameters:
+            data (dict): Dictionary containing the values to convert.
+            title_key (str): The key that should be used as the title property.
+
+        Returns:
+            dict: A dictionary defining the Notion property values.
+        """
         notion_props = {}
         for key, value in data.items():
             # Handle NumPy types
@@ -759,29 +803,19 @@ class NotionHelper:
     def create_ml_database(self, parent_page_id: str, db_title: str, config: Dict, metrics: Dict, file_property_name: str = "Output Files") -> str:
         """
         Analyzes dicts to create a new Notion Database with the correct schema.
+        Uses dict_to_notion_schema() for universal type conversion.
         """
-        # --- ENSURE ALL LINES BELOW ARE INDENTED BY 8 SPACES (assuming 4 for class) ---
         combined = {**config, **metrics}
         title_key = list(config.keys())[0]
 
-        properties = {}
+        # Use the universal dict_to_notion_schema() method
+        properties = self.dict_to_notion_schema(combined, title_key)
 
-        # 1. Map dictionary keys to Notion Property Types
-        for key, value in combined.items():
-            if key == title_key:
-                properties[key] = {"title": {}}
-            elif isinstance(value, (int, float)):
-                properties[key] = {"number": {"format": "number"}}
-            elif isinstance(value, bool):
-                properties[key] = {"checkbox": {}}
-            else:
-                properties[key] = {"rich_text": {}}
-
-        # 2. Add 'Run Status'
+        # Add 'Run Status' if not already present
         if "Run Status" not in properties:
             properties["Run Status"] = {"rich_text": {}}
 
-        # 3. Add the Multi-file property
+        # Add the Multi-file property
         properties[file_property_name] = {"files": {}}
 
         print(f"Creating database '{db_title}' with {len(properties)} columns...")

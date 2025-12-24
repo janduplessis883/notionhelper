@@ -1,6 +1,6 @@
 [project]
 name = "notionhelper"
-version = "0.3.0"
+version = "0.3.1"
 description = "NotionHelper is a Python library that simplifies interactions with the Notion API, enabling easy management of databases, pages, and files within Notion workspaces."
 readme = "README.md"
 authors = [
