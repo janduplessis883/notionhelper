@@ -261,6 +261,170 @@ print(f"Successfully attached file to property: {response}")
 
 These methods handle all the intermediate steps automatically, making file operations with Notion much simpler.
 
+### Machine Learning Experiment Tracking
+
+NotionHelper includes specialized functions for tracking machine learning experiments, making it easy to log configurations, metrics, plots, and output files to Notion databases. These functions automatically handle leaderboard tracking and provide a structured way to organize ML workflows.
+
+#### create_ml_database()
+Creates a new Notion database specifically designed for ML experiment tracking by analyzing your config and metrics dictionaries to automatically generate the appropriate schema.
+
+```python
+# Define your typical experiment configuration and metrics
+config = {
+    "Experiment Name": "LSTM Forecast v1",
+    "model_type": "LSTM",
+    "learning_rate": 0.001,
+    "batch_size": 32
+}
+
+metrics = {
+    "sMAPE": 12.5,
+    "MAE": 0.85,
+    "training_time": 45.2
+}
+
+# Create a new ML tracking database
+parent_page_id = "your_parent_page_id"
+data_source_id = helper.create_ml_database(
+    parent_page_id=parent_page_id,
+    db_title="ML Experiments - Time Series",
+    config=config,
+    metrics=metrics,
+    file_property_name="Output Files"  # Optional, defaults to "Output Files"
+)
+print(f"Created ML database with data source ID: {data_source_id}")
+```
+
+The function automatically:
+- Maps numeric values to Number properties
+- Maps booleans to Checkbox properties
+- Maps strings to Rich Text properties
+- Uses the first config key as the Title property
+- Adds a "Run Status" property for tracking improvements
+- Adds a Files & Media property for attaching output files
+
+#### log_ml_experiment()
+Logs a complete ML experiment run including configuration, metrics, plots, and output files. It automatically compares metrics against previous runs to identify improvements and track the best performing models.
+
+```python
+# Experiment configuration
+config = {
+    "Experiment Name": "LSTM Forecast v2",
+    "model_type": "LSTM",
+    "layers": 3,
+    "learning_rate": 0.001,
+    "dropout": 0.2
+}
+
+# Training metrics
+metrics = {
+    "sMAPE": 11.8,
+    "MAE": 0.78,
+    "RMSE": 1.23,
+    "training_time": 52.1
+}
+
+# Paths to plots and output files
+plots = [
+    "path/to/training_loss.png",
+    "path/to/predictions.png"
+]
+
+output_files = [
+    "path/to/model.h5",
+    "path/to/scaler.pkl",
+    "path/to/results.csv"
+]
+
+# Log the experiment
+page_id = helper.log_ml_experiment(
+    data_source_id=data_source_id,
+    config=config,
+    metrics=metrics,
+    plots=plots,  # Will be embedded in page body
+    target_metric="sMAPE",  # Metric to track for improvements
+    higher_is_better=False,  # Lower sMAPE is better
+    file_paths=output_files,  # Will be attached to Files & Media property
+    file_property_name="Output Files"
+)
+print(f"Logged experiment to page: {page_id}")
+```
+
+**Features:**
+- **Automatic Leaderboard Tracking**: Compares new results against previous runs
+- **Champion Detection**: Automatically tags new best scores with 🏆
+- **Performance Comparison**: Shows delta from current best when not improving
+- **Plot Embedding**: Embeds visualization plots directly in the page body
+- **File Attachments**: Attaches model files, scalers, and other outputs
+- **Timestamp Tracking**: Automatically adds timestamps to experiment names
+
+**Run Status Examples:**
+- `🏆 NEW BEST sMAPE (Prev: 12.50)` - New champion found
+- `No Improvement (+0.70 sMAPE)` - Score wasn't better
+- `Standard Run` - First run or metric tracking disabled
+
+#### upload_multiple_files_to_property()
+Uploads multiple files and attaches them all to a single Files & Media property on a page.
+
+```python
+page_id = "your_page_id"
+property_name = "Output Files"
+file_paths = [
+    "path/to/model.h5",
+    "path/to/scaler.pkl",
+    "path/to/predictions.csv"
+]
+
+response = helper.upload_multiple_files_to_property(page_id, property_name, file_paths)
+print(f"Successfully attached {len(file_paths)} files to property")
+```
+
+#### dict_to_notion_props()
+Converts a Python dictionary to Notion property format, handling type conversions automatically.
+
+```python
+data = {
+    "Experiment Name": "Model v1",
+    "accuracy": 0.95,
+    "epochs": 100,
+    "is_best": True
+}
+
+properties = helper.dict_to_notion_props(data, title_key="Experiment Name")
+# Properties are now formatted for Notion API
+```
+
+**Example ML Workflow:**
+
+```python
+# 1. Create ML tracking database (one-time setup)
+data_source_id = helper.create_ml_database(
+    parent_page_id="parent_page_id",
+    db_title="Computer Vision Experiments",
+    config={"Model Name": "ResNet50", "dataset": "ImageNet"},
+    metrics={"accuracy": 0.0, "f1_score": 0.0}
+)
+
+# 2. Run multiple experiments
+for lr in [0.001, 0.01, 0.1]:
+    # Train your model
+    model, metrics, plots = train_model(learning_rate=lr)
+
+    # Log to Notion
+    helper.log_ml_experiment(
+        data_source_id=data_source_id,
+        config={"Model Name": f"ResNet50_lr{lr}", "learning_rate": lr},
+        metrics=metrics,
+        plots=plots,
+        target_metric="accuracy",
+        higher_is_better=True
+    )
+
+# 3. Review results in Notion
+df = helper.get_data_source_pages_as_dataframe(data_source_id)
+print(df[["Model Name", "accuracy", "Run Status"]].sort_values("accuracy", ascending=False))
+```
+
 ## Code Quality
 
 The NotionHelper library includes several quality improvements:
@@ -301,6 +465,12 @@ The `NotionHelper` class provides the following methods:
 - **`one_step_image_embed(page_id, file_path)`** - Uploads and embeds an image in one operation
 - **`one_step_file_to_page(page_id, file_path)`** - Uploads and attaches a file to a page in one operation
 - **`one_step_file_to_page_property(page_id, property_name, file_path, file_name)`** - Uploads and attaches a file to a page property in one operation
+
+### Machine Learning Experiment Tracking
+- **`create_ml_database(parent_page_id, db_title, config, metrics, file_property_name="Output Files")`** - Creates a new Notion database specifically designed for ML experiment tracking with automatic schema generation
+- **`log_ml_experiment(data_source_id, config, metrics, plots=None, target_metric="sMAPE", higher_is_better=False, file_paths=None, file_property_name="Output Files")`** - Logs a complete ML experiment run including configuration, metrics, plots, and output files with automatic leaderboard tracking
+- **`upload_multiple_files_to_property(page_id, property_name, file_paths)`** - Uploads multiple files and attaches them all to a single Files & Media property
+- **`dict_to_notion_props(data, title_key)`** - Converts a Python dictionary to Notion property format with automatic type handling
 
 ## Requirements
 

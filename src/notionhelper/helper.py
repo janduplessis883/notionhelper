@@ -4,6 +4,9 @@ import os
 import requests
 import mimetypes
 import json
+from datetime import datetime
+import numpy as np
+
 
 # NotionHelper can be used in conjunction with the Streamlit APP: (Notion API JSON)[https://notioinapiassistant.streamlit.app]
 
@@ -94,6 +97,7 @@ class NotionHelper:
             response.raise_for_status()  # Raise an exception for HTTP errors
             return response.json()
         except requests.exceptions.HTTPError as http_err:
+            print(f"❌ NOTION API ERROR DETAILS: {response.text}")
             print(f"HTTP error occurred: {http_err}")
             if response is not None:  # Check if response was assigned before accessing .text
                 print(f"Response Body: {response.text}")
@@ -487,19 +491,22 @@ class NotionHelper:
         try:
             # Step 1: Create a File Upload object
             create_upload_url = "https://api.notion.com/v1/file_uploads"
-            # File uploads still use the older API version
-            upload_headers = {
+            headers = {
                 "Authorization": f"Bearer {self.notion_token}",
                 "Content-Type": "application/json",
-                "Notion-Version": "2022-06-28",
+                "Notion-Version": "2025-09-03",
             }
-            response = requests.post(create_upload_url, headers=upload_headers, json={})
+            response = requests.post(create_upload_url, headers=headers, json={})
             response.raise_for_status()
             upload_data = response.json()
             upload_url = upload_data["upload_url"]
 
             # Step 2: Upload file contents
             with open(file_path, "rb") as f:
+                upload_headers = {
+                    "Authorization": f"Bearer {self.notion_token}",
+                    "Notion-Version": "2025-09-03",
+                }
                 files = {'file': (os.path.basename(file_path), f, mimetypes.guess_type(file_path)[0] or 'application/octet-stream')}
                 upload_response = requests.post(upload_url, headers=upload_headers, files=files)
                 upload_response.raise_for_status()
@@ -512,7 +519,13 @@ class NotionHelper:
 
     def attach_file_to_page(self, page_id: str, file_upload_id: str) -> Dict[str, Any]:
         """Attaches an uploaded file to a specific page."""
-        payload = {
+        attach_url = f"https://api.notion.com/v1/blocks/{page_id}/children"
+        headers = {
+            "Authorization": f"Bearer {self.notion_token}",
+            "Content-Type": "application/json",
+            "Notion-Version": "2025-09-03",
+        }
+        data = {
             "children": [
                 {
                     "type": "file",
@@ -525,12 +538,18 @@ class NotionHelper:
                 }
             ]
         }
-        url = f"https://api.notion.com/v1/blocks/{page_id}/children"
-        return self._make_request("PATCH", url, payload)
+        response = requests.patch(attach_url, headers=headers, json=data)
+        return response.json()
 
     def embed_image_to_page(self, page_id: str, file_upload_id: str) -> Dict[str, Any]:
         """Embeds an uploaded image to a specific page."""
-        payload = {
+        attach_url = f"https://api.notion.com/v1/blocks/{page_id}/children"
+        headers = {
+            "Authorization": f"Bearer {self.notion_token}",
+            "Content-Type": "application/json",
+            "Notion-Version": "2025-09-03",
+        }
+        data = {
             "children": [
                 {
                     "type": "image",
@@ -543,14 +562,20 @@ class NotionHelper:
                 }
             ]
         }
-        url = f"https://api.notion.com/v1/blocks/{page_id}/children"
-        return self._make_request("PATCH", url, payload)
+        response = requests.patch(attach_url, headers=headers, json=data)
+        return response.json()
 
     def attach_file_to_page_property(
         self, page_id: str, property_name: str, file_upload_id: str, file_name: str
     ) -> Dict[str, Any]:
         """Attaches a file to a Files & Media property on a specific page."""
-        payload = {
+        update_url = f"https://api.notion.com/v1/pages/{page_id}"
+        headers = {
+            "Authorization": f"Bearer {self.notion_token}",
+            "Content-Type": "application/json",
+            "Notion-Version": "2025-09-03",
+        }
+        data = {
             "properties": {
                 property_name: {
                     "files": [
@@ -563,8 +588,8 @@ class NotionHelper:
                 }
             }
         }
-        url = f"https://api.notion.com/v1/pages/{page_id}"
-        return self._make_request("PATCH", url, payload)
+        response = requests.patch(update_url, headers=headers, json=data)
+        return response.json()
 
     def one_step_image_embed(self, page_id: str, file_path: str) -> Dict[str, Any]:
         """Uploads an image and embeds it in a Notion page in one step."""
@@ -595,3 +620,177 @@ class NotionHelper:
 
         # Attach the file to the page property
         return self.attach_file_to_page_property(page_id, property_name, file_upload_id, file_name)
+
+    def upload_multiple_files_to_property(self, page_id: str, property_name: str, file_paths: List[str]) -> Dict[str, Any]:
+        """Uploads multiple files and attaches them all to a single Notion property."""
+        file_assets = []
+
+        for path in file_paths:
+            if os.path.exists(path):
+                # 1. Upload each file individually
+                upload_resp = self.upload_file(path)
+                file_upload_id = upload_resp["id"]
+
+                # 2. Build the 'files' array for the Notion request
+                file_assets.append({
+                    "type": "file_upload",
+                    "file_upload": {"id": file_upload_id},
+                    "name": os.path.basename(path)
+                })
+
+        # 3. Update the page property with the full list
+        update_url = f"https://api.notion.com/v1/pages/{page_id}"
+        headers = {
+            "Authorization": f"Bearer {self.notion_token}",
+            "Content-Type": "application/json",
+            "Notion-Version": "2025-09-03",
+        }
+        data = {
+            "properties": {
+                property_name: {
+                    "files": file_assets  # This array contains all your files
+                }
+            }
+        }
+        response = requests.patch(update_url, headers=headers, json=data)
+        return response.json()
+
+    def dict_to_notion_props(self, data: Dict[str, Any], title_key: str) -> Dict[str, Any]:
+        notion_props = {}
+        for key, value in data.items():
+            # Handle NumPy types
+            if hasattr(value, "item"):
+                value = value.item()
+
+            if key == title_key:
+                ts = datetime.now().strftime("%Y-%m-%d %H:%M")
+                notion_props[key] = {"title": [{"text": {"content": f"{value} ({ts})"}}]}
+
+            # FIX: Handle Booleans
+            elif isinstance(value, bool):
+                # Option A: Map to a Checkbox column in Notion
+                # notion_props[key] = {"checkbox": value}
+
+                # Option B: Map to a Rich Text column as a string (since you added a rich text field)
+                notion_props[key] = {"rich_text": [{"text": {"content": str(value)}}]}
+
+            elif isinstance(value, (int, float)):
+                if pd.isna(value) or np.isinf(value): continue
+                notion_props[key] = {"number": float(value)}
+            else:
+                notion_props[key] = {"rich_text": [{"text": {"content": str(value)}}]}
+        return notion_props
+
+    def log_ml_experiment(
+        self,
+        data_source_id: str,
+        config: Dict,
+        metrics: Dict,
+        plots: List[str] = None,
+        target_metric: str = "sMAPE",      # Re-added these
+        higher_is_better: bool = False,   # to fix the error
+        file_paths: Optional[List[str]] = None, # Changed to list
+        file_property_name: str = "Output Files"
+    ):
+        """Logs ML experiment and compares metrics with multiple file support."""
+        improvement_tag = "Standard Run"
+        new_score = metrics.get(target_metric)
+
+        # 1. Leaderboard Logic (Champions)
+        if new_score is not None:
+            try:
+                df = self.get_data_source_pages_as_dataframe(data_source_id, limit=100)
+                if not df.empty and target_metric in df.columns:
+                    valid_scores = pd.to_numeric(df[target_metric], errors='coerce').dropna()
+                    if not valid_scores.empty:
+                        current_best = valid_scores.max() if higher_is_better else valid_scores.min()
+                        is_improvement = (new_score > current_best) if higher_is_better else (new_score < current_best)
+                        if is_improvement:
+                            improvement_tag = f"🏆 NEW BEST {target_metric} (Prev: {current_best:.2f})"
+                        else:
+                            diff = abs(new_score - current_best)
+                            improvement_tag = f"No Improvement (+{diff:.2f} {target_metric})"
+            except Exception as e:
+                print(f"Leaderboard check skipped: {e}")
+
+        # 2. Prepare Notion Properties
+        data_for_notion = metrics.copy()
+        data_for_notion["Run Status"] = improvement_tag
+        combined_payload = {**config, **data_for_notion}
+        title_key = list(config.keys())[0]
+        properties = self.dict_to_notion_props(combined_payload, title_key)
+
+        try:
+            # 3. Create the row
+            new_page = self.new_page_to_data_source(data_source_id, properties)
+            page_id = new_page["id"]
+
+            # 4. Handle Plots (Body)
+            if plots:
+                for plot_path in plots:
+                    if os.path.exists(plot_path):
+                        self.one_step_image_embed(page_id, plot_path)
+
+            # 5. Handle Multiple File Uploads (Property)
+            if file_paths:
+                file_assets = []
+                for path in file_paths:
+                    if os.path.exists(path):
+                        print(f"Uploading {path}...")
+                        upload_resp = self.upload_file(path)
+                        file_assets.append({
+                            "type": "file_upload",
+                            "file_upload": {"id": upload_resp["id"]},
+                            "name": os.path.basename(path),
+                        })
+
+                if file_assets:
+                    # Attach all files in one request
+                    update_url = f"https://api.notion.com/v1/pages/{page_id}"
+                    file_payload = {"properties": {file_property_name: {"files": file_assets}}}
+                    self._make_request("PATCH", update_url, file_payload)
+                    print(f"✅ {len(file_assets)} files attached to {file_property_name}")
+
+            return page_id
+        except Exception as e:
+            print(f"Log error: {e}")
+            return None
+
+    def create_ml_database(self, parent_page_id: str, db_title: str, config: Dict, metrics: Dict, file_property_name: str = "Output Files") -> str:
+        """
+        Analyzes dicts to create a new Notion Database with the correct schema.
+        """
+        # --- ENSURE ALL LINES BELOW ARE INDENTED BY 8 SPACES (assuming 4 for class) ---
+        combined = {**config, **metrics}
+        title_key = list(config.keys())[0]
+
+        properties = {}
+
+        # 1. Map dictionary keys to Notion Property Types
+        for key, value in combined.items():
+            if key == title_key:
+                properties[key] = {"title": {}}
+            elif isinstance(value, (int, float)):
+                properties[key] = {"number": {"format": "number"}}
+            elif isinstance(value, bool):
+                properties[key] = {"checkbox": {}}
+            else:
+                properties[key] = {"rich_text": {}}
+
+        # 2. Add 'Run Status'
+        if "Run Status" not in properties:
+            properties["Run Status"] = {"rich_text": {}}
+
+        # 3. Add the Multi-file property
+        properties[file_property_name] = {"files": {}}
+
+        print(f"Creating database '{db_title}' with {len(properties)} columns...")
+
+        response = self.create_database(
+            parent_page_id=parent_page_id,
+            database_title=db_title,
+            initial_data_source_properties=properties
+        )
+
+        data_source_id = response.get("initial_data_source", {}).get("id")
+        return data_source_id if data_source_id else response.get("id")
