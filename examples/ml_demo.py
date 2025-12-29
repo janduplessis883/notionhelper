@@ -304,7 +304,7 @@ def main():
         # ============================================================
         # Set CREATE_NEW_DB to True on first run, then set to False
         CREATE_NEW_DB = False  # Force creation for this run
-        PARENT_PAGE_ID = "c18faada67074eb2b39f4cb41390b521"
+        PARENT_PAGE_ID = "your page id here"
 
         if CREATE_NEW_DB:
             print("\n🗄️  Creating new Notion database...")
@@ -338,7 +338,7 @@ def main():
         # and the user has already provided a DATA_SOURCE_ID.
         else:
             # Replace with your actual data source ID after creating the database
-            DATA_SOURCE_ID = "3be191dd-591b-40de-9283-eca172e9b8fe" # This should be updated by the user
+            DATA_SOURCE_ID = "your_data_source_id_here" # This should be updated by the user
 
 
         if DATA_SOURCE_ID == "your_data_source_id_here":
