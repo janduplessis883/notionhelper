@@ -31,7 +31,7 @@ from sklearn.metrics import (
 )
 from sklearn.preprocessing import StandardScaler
 
-from carecast.notionhelper import NotionHelper
+from notionhelper import MLNotionHelper
 
 
 def train_logistic_regression(
@@ -296,8 +296,8 @@ def main():
         return
 
     try:
-        nh = NotionHelper(NOTION_TOKEN)
-        print("✓ NotionHelper initialized successfully")
+        nh = MLNotionHelper(NOTION_TOKEN)
+        print("✓ MLNotionHelper initialized successfully")
 
         # ============================================================
         # STEP 4A: Create New Database (First time only)

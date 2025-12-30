@@ -47,7 +47,7 @@ Here is an example of how to use the library:
 
 ```python
 import os
-from notionhelper import NotionHelper
+from notionhelper import NotionHelper, MLNotionHelper
 ```
 
 ### Initialize the NotionHelper class
@@ -55,7 +55,11 @@ from notionhelper import NotionHelper
 ```python
 notion_token = os.getenv("NOTION_TOKEN")
 
+# For core Notion operations
 helper = NotionHelper(notion_token)
+
+# For ML experiment tracking (includes all NotionHelper methods)
+ml_helper = MLNotionHelper(notion_token)
 ```
 
 ### Retrieve a Database (Container)

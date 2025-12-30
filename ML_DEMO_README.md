@@ -2,7 +2,9 @@
 
 ## Overview
 
-`ml_demo.py` is a comprehensive demonstration of how to use **NotionHelper** to track machine learning experiments. It showcases a complete workflow from model training to Notion integration.
+`ml_demo.py` is a comprehensive demonstration of how to use **MLNotionHelper** (which extends NotionHelper) to track machine learning experiments. It showcases a complete workflow from model training to Notion integration.
+
+**Note:** The ML experiment tracking features are available in the `MLNotionHelper` class, which inherits from `NotionHelper` and adds specialized methods for logging ML experiments.
 
 ## Features
 
