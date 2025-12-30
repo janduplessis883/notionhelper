@@ -141,6 +141,44 @@ helper.append_page_body(page_id, blocks)
 print(f"Successfully appended content to page ID: {page_id}")
 ```
 
+### Retrieve a Page and Convert to Markdown
+
+NotionHelper can retrieve page content and optionally convert it to markdown format for easy use in documents, blogs, or other applications.
+
+#### Get Page as JSON (Default)
+
+```python
+page_id = "your_page_id"
+result = helper.get_page(page_id)
+properties = result["properties"]  # Page properties
+content = result["content"]        # List of block objects (JSON)
+```
+
+#### Get Page as Markdown
+
+```python
+page_id = "your_page_id"
+result = helper.get_page(page_id, return_markdown=True)
+properties = result["properties"]  # Page properties
+markdown_content = result["content"]  # String in markdown format
+print(markdown_content)
+```
+
+The markdown conversion supports:
+- **Headings** (H1, H2, H3)
+- **Text formatting** (bold, italic, strikethrough, code, links)
+- **Lists** (bulleted and numbered)
+- **Code blocks** with language syntax highlighting
+- **Images**
+- **Dividers** and block quotes
+
+This is useful for:
+- Exporting Notion pages to markdown files
+- Integrating with static site generators
+- Creating blog posts from Notion content
+- Storing content in version control
+- Converting documentation to other formats
+
 ### Get all pages from a Data Source as a Pandas DataFrame
 
 ```python

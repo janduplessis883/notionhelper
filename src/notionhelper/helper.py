@@ -174,8 +174,118 @@ class NotionHelper:
         response = self._make_request("POST", url, payload)
         return response.get("results", [])
 
-    def get_page(self, page_id: str) -> Dict[str, Any]:
-        """Retrieves the JSON of the page properties and an array of blocks on a Notion page given its page_id."""
+    def _blocks_to_markdown(self, blocks: List[Dict[str, Any]]) -> str:
+        """Converts Notion blocks to markdown format.
+
+        Parameters:
+            blocks (list): List of block objects from Notion API
+
+        Returns:
+            str: Markdown formatted string
+        """
+        markdown_lines = []
+
+        for block in blocks:
+            block_type = block.get("type", "")
+            block_data = block.get(block_type, {})
+
+            if block_type == "paragraph":
+                text = self._extract_rich_text(block_data.get("rich_text", []))
+                if text:
+                    markdown_lines.append(text)
+                markdown_lines.append("")
+
+            elif block_type == "heading_1":
+                text = self._extract_rich_text(block_data.get("rich_text", []))
+                markdown_lines.append(f"# {text}")
+                markdown_lines.append("")
+
+            elif block_type == "heading_2":
+                text = self._extract_rich_text(block_data.get("rich_text", []))
+                markdown_lines.append(f"## {text}")
+                markdown_lines.append("")
+
+            elif block_type == "heading_3":
+                text = self._extract_rich_text(block_data.get("rich_text", []))
+                markdown_lines.append(f"### {text}")
+                markdown_lines.append("")
+
+            elif block_type == "bulleted_list_item":
+                text = self._extract_rich_text(block_data.get("rich_text", []))
+                markdown_lines.append(f"- {text}")
+
+            elif block_type == "numbered_list_item":
+                text = self._extract_rich_text(block_data.get("rich_text", []))
+                markdown_lines.append(f"1. {text}")
+
+            elif block_type == "code":
+                code_text = self._extract_rich_text(block_data.get("rich_text", []))
+                language = block_data.get("language", "")
+                markdown_lines.append(f"```{language}")
+                markdown_lines.append(code_text)
+                markdown_lines.append("```")
+                markdown_lines.append("")
+
+            elif block_type == "image":
+                image_data = block_data.get("external", {}) or block_data.get("file", {})
+                image_url = image_data.get("url", "")
+                if image_url:
+                    markdown_lines.append(f"![Image]({image_url})")
+                    markdown_lines.append("")
+
+            elif block_type == "divider":
+                markdown_lines.append("---")
+                markdown_lines.append("")
+
+            elif block_type == "quote":
+                text = self._extract_rich_text(block_data.get("rich_text", []))
+                markdown_lines.append(f"> {text}")
+                markdown_lines.append("")
+
+        return "\n".join(markdown_lines).strip()
+
+    def _extract_rich_text(self, rich_text_array: List[Dict[str, Any]]) -> str:
+        """Extracts and formats rich text from Notion rich_text array.
+
+        Parameters:
+            rich_text_array (list): Array of rich text objects
+
+        Returns:
+            str: Formatted text with markdown syntax
+        """
+        result = []
+
+        for text_obj in rich_text_array:
+            content = text_obj.get("text", {}).get("content", "")
+            annotations = text_obj.get("annotations", {})
+            href = text_obj.get("href", None)
+
+            # Apply markdown formatting based on annotations
+            if annotations.get("bold"):
+                content = f"**{content}**"
+            if annotations.get("italic"):
+                content = f"*{content}*"
+            if annotations.get("strikethrough"):
+                content = f"~~{content}~~"
+            if annotations.get("code"):
+                content = f"`{content}`"
+            if href:
+                content = f"[{content}]({href})"
+
+            result.append(content)
+
+        return "".join(result)
+
+    def get_page(self, page_id: str, return_markdown: bool = False) -> Dict[str, Any]:
+        """Retrieves the JSON of the page properties and an array of blocks on a Notion page given its page_id.
+
+        Parameters:
+            page_id (str): The ID of the Notion page
+            return_markdown (bool): If True, converts blocks to markdown. If False, returns raw JSON. Defaults to False.
+
+        Returns:
+            dict: Dictionary with 'properties' and 'content' (as JSON or markdown string)
+        """
 
         # Retrieve the page properties
         page_url = f"https://api.notion.com/v1/pages/{page_id}"
@@ -187,10 +297,13 @@ class NotionHelper:
 
         # Extract all properties as a JSON object
         properties = page.get("properties", {})
-        content = [block for block in blocks["results"]]
+        content_blocks = [block for block in blocks["results"]]
 
-        # Print the full JSON of the properties
-        print(properties)
+        # Convert to markdown if requested
+        if return_markdown:
+            content = self._blocks_to_markdown(content_blocks)
+        else:
+            content = content_blocks
 
         # Return the properties JSON and blocks content
         return {"properties": properties, "content": content}
