@@ -537,7 +537,8 @@ class NotionHelper:
                 property_type = value.get("type", "")
                 if property_type in allowed_properties:
                     if property_type == "title":
-                        row[key] = value.get("title", [{}])[0].get("plain_text", "")
+                        title_list = value.get("title", [])
+                        row[key] = title_list[0].get("plain_text", "") if title_list else ""
                     elif property_type == "status":
                         row[key] = value.get("status", {}).get("name", "")
                     elif property_type == "number":
