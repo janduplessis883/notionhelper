@@ -110,7 +110,7 @@ class MLNotionHelper(NotionHelper):
         target_metric: str = "sMAPE",
         higher_is_better: bool = False,
         file_paths: Optional[List[str]] = None,
-        file_property_name: str = "Output Files"
+        file_property_name: str = "Artifacts"
     ):
         """Logs ML experiment and compares metrics with multiple file support."""
         improvement_tag = "Standard Run"
@@ -176,7 +176,7 @@ class MLNotionHelper(NotionHelper):
             print(f"Log error: {e}")
             return None
 
-    def create_ml_database(self, parent_page_id: str, db_title: str, config: Dict, metrics: Dict, file_property_name: str = "Output Files") -> str:
+    def create_ml_database(self, parent_page_id: str, db_title: str, config: Dict, metrics: Dict, file_property_name: str = "Artifacts") -> str:
         """
         Analyzes dicts to create a new Notion Database with the correct schema.
         Uses dict_to_notion_schema() for universal type conversion.
