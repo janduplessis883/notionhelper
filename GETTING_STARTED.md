@@ -528,6 +528,16 @@ helper.append_page_body(page_id, blocks)
 print("Content added to page successfully!")
 ```
 
+You can also pass raw Markdown:
+
+```python
+markdown_body = """## Markdown Input
+
+This content is converted to Notion block JSON automatically.
+"""
+helper.append_page_body(page_id, markdown_body)
+```
+
 ---
 
 ## File Operations

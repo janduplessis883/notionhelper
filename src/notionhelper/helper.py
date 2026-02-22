@@ -1,14 +1,18 @@
-from typing import Optional, Dict, List, Any
+from typing import Optional, Dict, List, Any, Union
 import pandas as pd
 import os
 import requests
 import mimetypes
 import json
+import re
+import time
+import logging
 from datetime import datetime
 import numpy as np
 
 
 # NotionHelper can be used in conjunction with the Streamlit APP: (Notion API JSON)[https://notioinapiassistant.streamlit.app]
+LOGGER = logging.getLogger(__name__)
 
 
 class NotionHelper:
@@ -41,8 +45,8 @@ class NotionHelper:
     new_page_to_db(data_source_id, page_properties):
         Adds a new page to a Notion data source with the specified properties.
 
-    append_page_body(page_id, blocks):
-        Appends blocks of text to the body of a Notion page.
+    append_page_body(page_id, body):
+        Appends Notion blocks or raw markdown text to the body of a Notion page.
 
     get_all_page_ids(data_source_id):
         Returns the IDs of all pages in a given Notion data source.
@@ -69,45 +73,475 @@ class NotionHelper:
         Updates the attributes of a specified data source.
     """
 
-    def __init__(self, notion_token: str):
-        """Initializes the NotionHelper instance with the provided token."""
-        self.notion_token = notion_token
+    def __init__(
+        self,
+        notion_token: str,
+        debug: bool = False,
+        max_retries: int = 3,
+        retry_base_delay: float = 1.0,
+        request_timeout: float = 30.0,
+    ):
+        """Initializes the NotionHelper instance with the provided token.
 
-    def _make_request(self, method: str, url: str, payload: Optional[Dict[str, Any]] = None, api_version: str = "2025-09-03") -> Dict[str, Any]:
+        Parameters:
+            notion_token (str): Notion API secret.
+            debug (bool): Enables verbose debug logging for API calls.
+            max_retries (int): Number of retries for 429/5xx and transient request failures.
+            retry_base_delay (float): Base delay (seconds) for exponential backoff.
+            request_timeout (float): Timeout (seconds) for HTTP requests.
+        """
+        self.notion_token = notion_token
+        self.debug = debug
+        self.max_retries = max(0, max_retries)
+        self.retry_base_delay = max(0.1, retry_base_delay)
+        self.request_timeout = max(1.0, request_timeout)
+        self._supported_block_types = {
+            "bookmark",
+            "breadcrumb",
+            "bulleted_list_item",
+            "callout",
+            "child_database",
+            "child_page",
+            "code",
+            "column",
+            "column_list",
+            "divider",
+            "embed",
+            "equation",
+            "file",
+            "heading_1",
+            "heading_2",
+            "heading_3",
+            "image",
+            "link_preview",
+            "link_to_page",
+            "numbered_list_item",
+            "paragraph",
+            "pdf",
+            "quote",
+            "synced_block",
+            "table",
+            "table_row",
+            "table_of_contents",
+            "to_do",
+            "toggle",
+            "video",
+        }
+
+    def _utf16_units(self, value: str) -> int:
+        """Returns the number of UTF-16 code units in a string."""
+        return len(value.encode("utf-16-le")) // 2
+
+    def _chunk_text(self, value: str, max_utf16_units: int = 2000) -> List[str]:
+        """Splits text into chunks that each fit Notion's UTF-16 length limit."""
+        if not value:
+            return [""]
+
+        chunks = []
+        current_chars: List[str] = []
+        current_units = 0
+
+        for char in value:
+            char_units = self._utf16_units(char)
+            if current_chars and current_units + char_units > max_utf16_units:
+                chunks.append("".join(current_chars))
+                current_chars = [char]
+                current_units = char_units
+            else:
+                current_chars.append(char)
+                current_units += char_units
+
+        if current_chars:
+            chunks.append("".join(current_chars))
+
+        return chunks
+
+    def _normalize_rich_text(self, items: Any) -> List[Dict[str, Any]]:
+        """Normalizes rich text entries into a Notion-safe text-only representation."""
+        if not isinstance(items, list):
+            return []
+
+        normalized: List[Dict[str, Any]] = []
+        default_annotations = {
+            "bold": False,
+            "italic": False,
+            "strikethrough": False,
+            "underline": False,
+            "code": False,
+            "color": "default",
+        }
+
+        for item in items:
+            content = ""
+            link_url = None
+            annotations = default_annotations.copy()
+
+            if isinstance(item, str):
+                content = item
+            elif isinstance(item, dict):
+                item_annotations = item.get("annotations", {})
+                if isinstance(item_annotations, dict):
+                    annotations.update(
+                        {
+                            "bold": bool(item_annotations.get("bold", False)),
+                            "italic": bool(item_annotations.get("italic", False)),
+                            "strikethrough": bool(item_annotations.get("strikethrough", False)),
+                            "underline": bool(item_annotations.get("underline", False)),
+                            "code": bool(item_annotations.get("code", False)),
+                            "color": item_annotations.get("color", "default") or "default",
+                        }
+                    )
+
+                text_obj = item.get("text") if isinstance(item.get("text"), dict) else {}
+                if item.get("type") == "text" and isinstance(text_obj, dict):
+                    text_obj = item["text"]
+                    content = text_obj.get("content", "") or item.get("plain_text", "")
+                    link_obj = text_obj.get("link")
+                    if isinstance(link_obj, dict):
+                        link_url = link_obj.get("url")
+                else:
+                    content = text_obj.get("content", "") or item.get("plain_text", "")
+
+                if item.get("href"):
+                    link_url = item.get("href")
+            else:
+                continue
+
+            if not isinstance(content, str):
+                content = str(content)
+
+            for chunk in self._chunk_text(content, 2000):
+                text_entry: Dict[str, Any] = {"content": chunk}
+                if link_url:
+                    text_entry["link"] = {"url": link_url}
+                normalized.append(
+                    {
+                        "type": "text",
+                        "text": text_entry,
+                        "annotations": annotations.copy(),
+                    }
+                )
+
+        return normalized
+
+    def _sanitize_notion_block(self, block: Any) -> Optional[Dict[str, Any]]:
+        """Sanitizes a single Notion block for the children append API."""
+        if not isinstance(block, dict):
+            return None
+
+        raw_type = block.get("type")
+        if not isinstance(raw_type, str):
+            return None
+
+        block_type = raw_type
+        if raw_type.startswith("heading_"):
+            match = re.match(r"heading_(\d+)$", raw_type)
+            if match and int(match.group(1)) > 3:
+                block_type = "heading_3"
+
+        if block_type not in self._supported_block_types:
+            return None
+
+        block_payload = block.get(raw_type, {})
+        if not isinstance(block_payload, dict):
+            block_payload = {}
+
+        sanitized_payload: Dict[str, Any] = {}
+        for key, value in block_payload.items():
+            if key in {"rich_text", "caption"}:
+                sanitized_payload[key] = self._normalize_rich_text(value)
+            elif key == "children":
+                if isinstance(value, list):
+                    sanitized_payload[key] = self._sanitize_blocks(value)
+            else:
+                sanitized_payload[key] = value
+
+        if block_type == "code":
+            if not isinstance(sanitized_payload.get("language"), str) or not sanitized_payload.get("language"):
+                sanitized_payload["language"] = "plain text"
+
+        return {
+            "object": "block",
+            "type": block_type,
+            block_type: sanitized_payload,
+        }
+
+    def _sanitize_blocks(self, blocks: Any) -> List[Dict[str, Any]]:
+        """Sanitizes a list of blocks, dropping unsupported or malformed blocks."""
+        if not isinstance(blocks, list):
+            return []
+        sanitized_blocks = []
+        for block in blocks:
+            sanitized = self._sanitize_notion_block(block)
+            if sanitized:
+                sanitized_blocks.append(sanitized)
+        return sanitized_blocks
+
+    def _plain_text_rich_text(self, value: str) -> List[Dict[str, Any]]:
+        """Builds a plain text rich_text array, using the shared normalizer/chunker."""
+        return self._normalize_rich_text([{"type": "text", "text": {"content": value}}])
+
+    def _markdown_to_blocks(self, markdown: str) -> List[Dict[str, Any]]:
+        """Converts markdown into a basic list of Notion block objects."""
+        lines = markdown.splitlines()
+        blocks: List[Dict[str, Any]] = []
+        paragraph_lines: List[str] = []
+
+        def flush_paragraph() -> None:
+            if not paragraph_lines:
+                return
+            text = " ".join(part.strip() for part in paragraph_lines if part.strip()).strip()
+            paragraph_lines.clear()
+            if not text:
+                return
+            blocks.append(
+                {
+                    "object": "block",
+                    "type": "paragraph",
+                    "paragraph": {"rich_text": self._plain_text_rich_text(text)},
+                }
+            )
+
+        in_code_fence = False
+        code_language = "plain text"
+        code_lines: List[str] = []
+
+        for line in lines:
+            stripped = line.strip()
+
+            if in_code_fence:
+                if stripped.startswith("```"):
+                    blocks.append(
+                        {
+                            "object": "block",
+                            "type": "code",
+                            "code": {
+                                "language": code_language,
+                                "rich_text": self._plain_text_rich_text("\n".join(code_lines)),
+                            },
+                        }
+                    )
+                    in_code_fence = False
+                    code_language = "plain text"
+                    code_lines = []
+                else:
+                    code_lines.append(line.rstrip("\n"))
+                continue
+
+            fence_match = re.match(r"^```([a-zA-Z0-9_+\- ]*)\s*$", stripped)
+            if fence_match:
+                flush_paragraph()
+                in_code_fence = True
+                parsed_language = fence_match.group(1).strip()
+                code_language = parsed_language if parsed_language else "plain text"
+                code_lines = []
+                continue
+
+            if not stripped:
+                flush_paragraph()
+                continue
+
+            heading_match = re.match(r"^(#{1,6})\s+(.*)$", stripped)
+            if heading_match:
+                flush_paragraph()
+                level = min(len(heading_match.group(1)), 3)
+                text = heading_match.group(2).strip()
+                blocks.append(
+                    {
+                        "object": "block",
+                        "type": f"heading_{level}",
+                        f"heading_{level}": {"rich_text": self._plain_text_rich_text(text)},
+                    }
+                )
+                continue
+
+            if re.match(r"^([-*_])(?:\s*\1){2,}\s*$", stripped):
+                flush_paragraph()
+                blocks.append({"object": "block", "type": "divider", "divider": {}})
+                continue
+
+            quote_match = re.match(r"^>\s?(.*)$", stripped)
+            if quote_match:
+                flush_paragraph()
+                blocks.append(
+                    {
+                        "object": "block",
+                        "type": "quote",
+                        "quote": {"rich_text": self._plain_text_rich_text(quote_match.group(1).strip())},
+                    }
+                )
+                continue
+
+            unordered_match = re.match(r"^[-*+]\s+(.*)$", stripped)
+            if unordered_match:
+                flush_paragraph()
+                blocks.append(
+                    {
+                        "object": "block",
+                        "type": "bulleted_list_item",
+                        "bulleted_list_item": {
+                            "rich_text": self._plain_text_rich_text(unordered_match.group(1).strip())
+                        },
+                    }
+                )
+                continue
+
+            ordered_match = re.match(r"^\d+\.\s+(.*)$", stripped)
+            if ordered_match:
+                flush_paragraph()
+                blocks.append(
+                    {
+                        "object": "block",
+                        "type": "numbered_list_item",
+                        "numbered_list_item": {
+                            "rich_text": self._plain_text_rich_text(ordered_match.group(1).strip())
+                        },
+                    }
+                )
+                continue
+
+            paragraph_lines.append(line)
+
+        if in_code_fence:
+            blocks.append(
+                {
+                    "object": "block",
+                    "type": "code",
+                    "code": {
+                        "language": code_language,
+                        "rich_text": self._plain_text_rich_text("\n".join(code_lines)),
+                    },
+                }
+            )
+
+        flush_paragraph()
+        return blocks
+
+    def _make_request(
+        self,
+        method: str,
+        url: str,
+        payload: Optional[Dict[str, Any]] = None,
+        api_version: str = "2025-09-03",
+        params: Optional[Dict[str, Any]] = None,
+    ) -> Dict[str, Any]:
         """
         Internal helper to make authenticated requests to the Notion API.
-        Handles headers, JSON serialization, and error checking.
+        Handles headers, JSON serialization, retries/backoff, and error reporting.
         """
         headers = {
             "Authorization": f"Bearer {self.notion_token}",
             "Content-Type": "application/json",
             "Notion-Version": api_version,
         }
-        response = None  # Initialize response to None
-        try:
-            if method == "GET":
-                response = requests.get(url, headers=headers)
-            elif method == "POST":
-                response = requests.post(url, headers=headers, data=json.dumps(payload))
-            elif method == "PATCH":
-                response = requests.patch(url, headers=headers, data=json.dumps(payload))
-            else:
-                raise ValueError(f"Unsupported HTTP method: {method}")
+        response = None
+        request_method = method.upper()
+        if request_method not in {"GET", "POST", "PATCH"}:
+            raise ValueError(f"Unsupported HTTP method: {method}")
 
-            response.raise_for_status()  # Raise an exception for HTTP errors
-            return response.json()
-        except requests.exceptions.HTTPError as http_err:
-            print(f"❌ NOTION API ERROR DETAILS: {response.text}")
-            print(f"HTTP error occurred: {http_err}")
-            if response is not None:  # Check if response was assigned before accessing .text
-                print(f"Response Body: {response.text}")
-            raise
-        except requests.exceptions.RequestException as req_err:
-            print(f"Request error occurred: {req_err}")
-            raise
-        except Exception as e:
-            print(f"An unexpected error occurred: {e}")
-            raise
+        if self.debug:
+            LOGGER.debug(
+                "Notion request method=%s url=%s params=%s payload_keys=%s",
+                request_method,
+                url,
+                params,
+                sorted(payload.keys()) if isinstance(payload, dict) else None,
+            )
+
+        for attempt in range(self.max_retries + 1):
+            try:
+                if request_method == "GET":
+                    response = requests.get(
+                        url,
+                        headers=headers,
+                        params=params,
+                        timeout=self.request_timeout,
+                    )
+                elif request_method == "POST":
+                    response = requests.post(
+                        url,
+                        headers=headers,
+                        data=json.dumps(payload),
+                        timeout=self.request_timeout,
+                    )
+                else:
+                    response = requests.patch(
+                        url,
+                        headers=headers,
+                        data=json.dumps(payload),
+                        timeout=self.request_timeout,
+                    )
+
+                if response.status_code in {429, 500, 502, 503, 504} and attempt < self.max_retries:
+                    retry_after = response.headers.get("Retry-After")
+                    try:
+                        delay = float(retry_after) if retry_after else self.retry_base_delay * (2 ** attempt)
+                    except ValueError:
+                        delay = self.retry_base_delay * (2 ** attempt)
+                    LOGGER.warning(
+                        "Transient Notion error status=%s on %s %s. Retrying in %.2fs (attempt %s/%s).",
+                        response.status_code,
+                        request_method,
+                        url,
+                        delay,
+                        attempt + 1,
+                        self.max_retries,
+                    )
+                    time.sleep(delay)
+                    continue
+
+                response.raise_for_status()
+                try:
+                    return response.json()
+                except ValueError:
+                    return {}
+
+            except requests.exceptions.RequestException as req_err:
+                is_last_attempt = attempt >= self.max_retries
+                if not is_last_attempt:
+                    delay = self.retry_base_delay * (2 ** attempt)
+                    LOGGER.warning(
+                        "Request error on %s %s: %s. Retrying in %.2fs (attempt %s/%s).",
+                        request_method,
+                        url,
+                        req_err,
+                        delay,
+                        attempt + 1,
+                        self.max_retries,
+                    )
+                    time.sleep(delay)
+                    continue
+
+                response_body = response.text if response is not None else None
+                LOGGER.error(
+                    "Notion API request failed method=%s url=%s status=%s error=%s response=%s",
+                    request_method,
+                    url,
+                    response.status_code if response is not None else None,
+                    req_err,
+                    response_body,
+                )
+
+                if response is not None and payload and isinstance(payload.get("children"), list):
+                    message = ""
+                    try:
+                        err_json = response.json()
+                        message = err_json.get("message", "") if isinstance(err_json, dict) else ""
+                    except ValueError:
+                        message = response.text
+
+                    block_index_match = re.search(r"children\[(\d+)\]", message or "")
+                    if block_index_match:
+                        bad_index = int(block_index_match.group(1))
+                        if 0 <= bad_index < len(payload["children"]):
+                            LOGGER.error(
+                                "Likely failing child block at index %s: %s",
+                                bad_index,
+                                json.dumps(payload["children"][bad_index], indent=2),
+                            )
+                raise
+
+        raise RuntimeError("Request retry loop exited unexpectedly")
 
     def get_database(self, database_id: str) -> Dict[str, Any]:
         """Retrieves the schema of a Notion database given its database_id.
@@ -291,13 +725,24 @@ class NotionHelper:
         page_url = f"https://api.notion.com/v1/pages/{page_id}"
         page = self._make_request("GET", page_url)
 
-        # Retrieve the block data (content)
+        # Retrieve the block data (content) with pagination
         blocks_url = f"https://api.notion.com/v1/blocks/{page_id}/children"
-        blocks = self._make_request("GET", blocks_url)
+        content_blocks: List[Dict[str, Any]] = []
+        next_cursor = None
+        while True:
+            params = {"page_size": 100}
+            if next_cursor:
+                params["start_cursor"] = next_cursor
+            blocks = self._make_request("GET", blocks_url, params=params)
+            content_blocks.extend(blocks.get("results", []))
+            if not blocks.get("has_more"):
+                break
+            next_cursor = blocks.get("next_cursor")
+            if not next_cursor:
+                break
 
         # Extract all properties as a JSON object
         properties = page.get("properties", {})
-        content_blocks = [block for block in blocks["results"]]
 
         # Convert to markdown if requested
         if return_markdown:
@@ -396,11 +841,67 @@ class NotionHelper:
         url = "https://api.notion.com/v1/pages"
         return self._make_request("POST", url, payload)
 
-    def append_page_body(self, page_id: str, blocks: List[Dict[str, Any]]) -> Dict[str, Any]:
-        """Appends blocks of text to the body of a Notion page."""
-        payload = {"children": blocks}
+    def append_page_body(
+        self,
+        page_id: str,
+        body: Optional[Union[str, List[Dict[str, Any]]]] = None,
+        sanitize: bool = True,
+        blocks: Optional[List[Dict[str, Any]]] = None,
+        batch_size: int = 100,
+    ) -> Dict[str, Any]:
+        """Appends blocks or markdown text to a Notion page body.
+
+        Parameters:
+            page_id (str): The Notion page ID.
+            body (str | list[dict]): Raw markdown text or a Notion blocks array.
+            sanitize (bool): If True, run block/rich_text sanitization before request.
+            blocks (list[dict] | None): Backward-compatible alias for body when passing blocks.
+            batch_size (int): Number of child blocks per append request (Notion max is 100).
+        """
+        if body is None and blocks is not None:
+            body = blocks
+        elif body is not None and blocks is not None:
+            raise ValueError("Provide either body or blocks, not both")
+        elif body is None:
+            raise ValueError("Either body or blocks must be provided")
+
+        if isinstance(body, str):
+            payload_blocks = self._markdown_to_blocks(body)
+        elif isinstance(body, list):
+            payload_blocks = body
+        else:
+            raise TypeError("body must be a markdown string or a list of Notion blocks")
+
+        if sanitize:
+            payload_blocks = self._sanitize_blocks(payload_blocks)
+
+        if batch_size < 1:
+            raise ValueError("batch_size must be >= 1")
+        batch_size = min(batch_size, 100)
+
         url = f"https://api.notion.com/v1/blocks/{page_id}/children"
-        return self._make_request("PATCH", url, payload)
+        if not payload_blocks:
+            return {"object": "list", "results": []}
+
+        responses = []
+        for start_idx in range(0, len(payload_blocks), batch_size):
+            payload = {"children": payload_blocks[start_idx:start_idx + batch_size]}
+            responses.append(self._make_request("PATCH", url, payload))
+
+        if len(responses) == 1:
+            return responses[0]
+
+        merged_results: List[Dict[str, Any]] = []
+        for response in responses:
+            if isinstance(response, dict) and isinstance(response.get("results"), list):
+                merged_results.extend(response["results"])
+
+        return {
+            "object": "list",
+            "results": merged_results,
+            "batch_count": len(responses),
+            "responses": responses,
+        }
 
     def get_data_source_page_ids(self, data_source_id: str) -> List[str]:
         """Returns the IDs of all pages in a given data source.

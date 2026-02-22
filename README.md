@@ -141,6 +141,16 @@ helper.append_page_body(page_id, blocks)
 print(f"Successfully appended content to page ID: {page_id}")
 ```
 
+You can also pass raw Markdown directly:
+
+```python
+markdown_body = """# Hello from Markdown
+
+This paragraph is converted to Notion blocks internally.
+"""
+helper.append_page_body(page_id, markdown_body)
+```
+
 ### Retrieve a Page and Convert to Markdown
 
 NotionHelper can retrieve page content and optionally convert it to markdown format for easy use in documents, blogs, or other applications.
@@ -489,7 +499,7 @@ The `NotionHelper` class provides the following methods:
 
 ### Page Operations
 - **`new_page_to_data_source(data_source_id, page_properties)`** - Adds a new page to a Notion data source with the specified properties.
-- **`append_page_body(page_id, blocks)`** - Appends blocks of text to the body of a Notion page.
+- **`append_page_body(page_id, body=None, sanitize=True, blocks=None, batch_size=100)`** - Appends either Notion blocks (`list[dict]`) or raw Markdown (`str`) to a Notion page body with optional sanitization and automatic batching.
 - **`get_page(page_id)`** - Retrieves the JSON of the page properties and an array of blocks on a Notion page given its page_id.
 
 ### Data Retrieval & Conversion
