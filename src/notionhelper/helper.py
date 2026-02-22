@@ -7,6 +7,7 @@ import json
 import re
 import time
 import logging
+from urllib.parse import urlparse, parse_qs
 from datetime import datetime
 import numpy as np
 
@@ -131,6 +132,62 @@ class NotionHelper:
     def _utf16_units(self, value: str) -> int:
         """Returns the number of UTF-16 code units in a string."""
         return len(value.encode("utf-16-le")) // 2
+
+    def _normalize_notion_id(self, value: str, with_hyphens: bool = True) -> Optional[str]:
+        """Normalizes a Notion UUID/hex ID to either 32-char or hyphenated UUID format."""
+        if not isinstance(value, str):
+            return None
+        compact = value.strip().replace("-", "")
+        if not re.fullmatch(r"[0-9a-fA-F]{32}", compact):
+            return None
+        compact = compact.lower()
+        if not with_hyphens:
+            return compact
+        return (
+            f"{compact[0:8]}-{compact[8:12]}-{compact[12:16]}-"
+            f"{compact[16:20]}-{compact[20:32]}"
+        )
+
+    def extract_page_id_from_url(self, page_url_or_id: str, with_hyphens: bool = True) -> str:
+        """Extracts a Notion page ID from a page URL or raw page ID string.
+
+        Parameters:
+            page_url_or_id (str): Notion page URL or raw page ID.
+            with_hyphens (bool): Return UUID with hyphens if True, else compact 32-char form.
+
+        Returns:
+            str: Normalized Notion page ID.
+        """
+        direct = self._normalize_notion_id(page_url_or_id, with_hyphens=with_hyphens)
+        if direct:
+            return direct
+
+        if not isinstance(page_url_or_id, str):
+            raise TypeError("page_url_or_id must be a string")
+
+        parsed = urlparse(page_url_or_id.strip())
+        candidates: List[str] = []
+
+        # Path is most reliable for shared page URLs
+        candidates.extend(
+            re.findall(
+                r"([0-9a-fA-F]{32}|[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12})",
+                parsed.path,
+            )
+        )
+
+        # Query params fallback
+        query_values = parse_qs(parsed.query)
+        for key in ("p", "page_id", "id"):
+            for value in query_values.get(key, []):
+                candidates.append(value)
+
+        for candidate in candidates:
+            normalized = self._normalize_notion_id(candidate, with_hyphens=with_hyphens)
+            if normalized:
+                return normalized
+
+        raise ValueError("Could not extract a valid Notion page ID from the input")
 
     def _chunk_text(self, value: str, max_utf16_units: int = 2000) -> List[str]:
         """Splits text into chunks that each fit Notion's UTF-16 length limit."""

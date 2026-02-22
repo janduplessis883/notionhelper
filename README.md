@@ -1,6 +1,6 @@
 # NotionHelper
 
-![NotionHelper](images/notionh4.png?raw=true)
+![NotionHelper](https://github.com/janduplessis883/notionhelper/raw/master/images/notionh4.png?raw=true)
 
 `NotionHelper` is a Python library that provides a convenient interface for interacting with the Notion API, specifically designed to leverage the **Notion API Version 2025-09-03**. It simplifies common tasks such as managing databases, data sources, pages, and file uploads, allowing you to integrate Notion's powerful features into your applications with ease.
 
@@ -501,6 +501,7 @@ The `NotionHelper` class provides the following methods:
 - **`new_page_to_data_source(data_source_id, page_properties)`** - Adds a new page to a Notion data source with the specified properties.
 - **`append_page_body(page_id, body=None, sanitize=True, blocks=None, batch_size=100)`** - Appends either Notion blocks (`list[dict]`) or raw Markdown (`str`) to a Notion page body with optional sanitization and automatic batching.
 - **`get_page(page_id)`** - Retrieves the JSON of the page properties and an array of blocks on a Notion page given its page_id.
+- **`extract_page_id_from_url(page_url_or_id, with_hyphens=True)`** - Extracts and normalizes a Notion page ID from either a Notion URL or raw ID.
 
 ### Data Retrieval & Conversion
 - **`get_data_source_page_ids(data_source_id)`** - Returns the IDs of all pages in a given data source.
