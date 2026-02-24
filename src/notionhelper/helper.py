@@ -733,6 +733,19 @@ class NotionHelper:
                 markdown_lines.append(f"> {text}")
                 markdown_lines.append("")
 
+            elif block_type in {"bookmark", "embed", "link_preview"}:
+                block_url = block_data.get("url", "")
+                if block_url:
+                    markdown_lines.append(f"[{block_url}]({block_url})")
+                    markdown_lines.append("")
+
+            elif block_type in {"file", "pdf", "video"}:
+                media_data = block_data.get("external", {}) or block_data.get("file", {})
+                media_url = media_data.get("url", "")
+                if media_url:
+                    markdown_lines.append(f"[{block_type}]({media_url})")
+                    markdown_lines.append("")
+
         return "\n".join(markdown_lines).strip()
 
     def _extract_rich_text(self, rich_text_array: List[Dict[str, Any]]) -> str:
@@ -747,9 +760,22 @@ class NotionHelper:
         result = []
 
         for text_obj in rich_text_array:
-            content = text_obj.get("text", {}).get("content", "")
+            if not isinstance(text_obj, dict):
+                continue
+
+            text_data = text_obj.get("text", {}) if isinstance(text_obj.get("text"), dict) else {}
+            content = text_data.get("content", "") or text_obj.get("plain_text", "") or ""
+            if not isinstance(content, str):
+                content = str(content)
+
             annotations = text_obj.get("annotations", {})
             href = text_obj.get("href", None)
+            if not href:
+                link_obj = text_data.get("link")
+                if isinstance(link_obj, dict):
+                    href = link_obj.get("url")
+            if href and not content:
+                content = href
 
             # Apply markdown formatting based on annotations
             if annotations.get("bold"):

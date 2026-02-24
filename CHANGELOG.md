@@ -2,6 +2,15 @@
 
 All notable changes to this project are documented in this file.
 
+## [0.5.2] - 2026-02-24
+
+### Added
+- Tests for URL-preserving markdown conversion in rich text and URL-based block types.
+
+### Changed
+- Improved `_extract_rich_text` to preserve links from `text.link.url` and fallback to `plain_text` when needed.
+- Extended `_blocks_to_markdown` URL rendering support for `bookmark`, `embed`, and `link_preview` blocks.
+
 ## [0.5.0] - 2026-02-22
 
 ### Added
