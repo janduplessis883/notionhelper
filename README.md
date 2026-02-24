@@ -499,6 +499,8 @@ The `NotionHelper` class provides the following methods:
 
 ### Page Operations
 - **`new_page_to_data_source(data_source_id, page_properties)`** - Adds a new page to a Notion data source with the specified properties.
+- **`trash_page(page_id)`** - Moves a page to Notion trash.
+- **`restore_page(page_id)`** - Restores a page from Notion trash.
 - **`append_page_body(page_id, body=None, sanitize=True, blocks=None, batch_size=100)`** - Appends either Notion blocks (`list[dict]`) or raw Markdown (`str`) to a Notion page body with optional sanitization and automatic batching.
 - **`get_page(page_id)`** - Retrieves the JSON of the page properties and an array of blocks on a Notion page given its page_id.
 - **`extract_page_id_from_url(page_url_or_id, with_hyphens=True)`** - Extracts and normalizes a Notion page ID from either a Notion URL or raw ID.

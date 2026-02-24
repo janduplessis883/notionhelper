@@ -924,6 +924,18 @@ class NotionHelper:
         url = "https://api.notion.com/v1/pages"
         return self._make_request("POST", url, payload)
 
+    def trash_page(self, page_id: str) -> Dict[str, Any]:
+        """Moves a Notion page to trash."""
+        url = f"https://api.notion.com/v1/pages/{page_id}"
+        payload = {"in_trash": True}
+        return self._make_request("PATCH", url, payload)
+
+    def restore_page(self, page_id: str) -> Dict[str, Any]:
+        """Restores a Notion page from trash."""
+        url = f"https://api.notion.com/v1/pages/{page_id}"
+        payload = {"in_trash": False}
+        return self._make_request("PATCH", url, payload)
+
     def append_page_body(
         self,
         page_id: str,

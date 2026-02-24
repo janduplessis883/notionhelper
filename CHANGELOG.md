@@ -2,6 +2,16 @@
 
 All notable changes to this project are documented in this file.
 
+## [0.5.3] - 2026-02-24
+
+### Added
+- `trash_page(page_id)` to move pages to Notion trash.
+- `restore_page(page_id)` to restore pages from Notion trash.
+- Unit tests covering page trash/restore request payloads.
+
+### Changed
+- Updated function reference docs for the new page trash APIs.
+
 ## [0.5.2] - 2026-02-24
 
 ### Added
