@@ -2,6 +2,18 @@
 
 All notable changes to this project are documented in this file.
 
+## [0.5.4] - 2026-02-26
+
+### Added
+- Optional `notion_blockify` integration for markdown-to-Notion conversion with automatic fallback to the built-in parser.
+- Table conversion coverage for markdown import/export and nested-table retrieval in `get_page(..., return_markdown=True)`.
+
+### Changed
+- Improved inline markdown parsing in `append_page_body(..., body=str)` to correctly render bold/italic/strikethrough/code/links as Notion rich text annotations.
+- Added simple markdown table support in `_markdown_to_blocks`.
+- Extended `_blocks_to_markdown` to render Notion `table` blocks back into markdown tables.
+- `get_page` now hydrates nested child blocks recursively, enabling table row content to be included in markdown output.
+
 ## [0.5.3] - 2026-02-24
 
 ### Added

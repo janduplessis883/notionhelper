@@ -11,6 +11,11 @@ from urllib.parse import urlparse, parse_qs
 from datetime import datetime
 import numpy as np
 
+try:
+    import notion_blockify  # type: ignore
+except ImportError:
+    notion_blockify = None
+
 
 # NotionHelper can be used in conjunction with the Streamlit APP: (Notion API JSON)[https://notioinapiassistant.streamlit.app]
 LOGGER = logging.getLogger(__name__)
@@ -310,6 +315,16 @@ class NotionHelper:
             elif key == "children":
                 if isinstance(value, list):
                     sanitized_payload[key] = self._sanitize_blocks(value)
+            elif key == "cells" and isinstance(value, list):
+                normalized_cells: List[List[Dict[str, Any]]] = []
+                for cell in value:
+                    if isinstance(cell, list):
+                        normalized_cells.append(self._normalize_rich_text(cell))
+                    elif isinstance(cell, str):
+                        normalized_cells.append(self._plain_text_rich_text(cell))
+                    else:
+                        normalized_cells.append([])
+                sanitized_payload[key] = normalized_cells
             else:
                 sanitized_payload[key] = value
 
@@ -338,8 +353,264 @@ class NotionHelper:
         """Builds a plain text rich_text array, using the shared normalizer/chunker."""
         return self._normalize_rich_text([{"type": "text", "text": {"content": value}}])
 
+    def _parse_inline_markdown_segments(
+        self,
+        value: str,
+        inherited_annotations: Optional[Dict[str, Any]] = None,
+        inherited_href: Optional[str] = None,
+        depth: int = 0,
+    ) -> List[Dict[str, Any]]:
+        """Parses basic inline markdown syntax into text segments with annotations."""
+        if not value:
+            return []
+        if depth > 8:
+            return [
+                {
+                    "text": value,
+                    "annotations": inherited_annotations or {},
+                    "href": inherited_href,
+                }
+            ]
+
+        annotations = {
+            "bold": False,
+            "italic": False,
+            "strikethrough": False,
+            "underline": False,
+            "code": False,
+            "color": "default",
+        }
+        if isinstance(inherited_annotations, dict):
+            annotations.update(inherited_annotations)
+
+        token_patterns = [
+            ("link", re.compile(r"\[([^\]]+)\]\((https?://[^\s)]+)\)")),
+            ("code", re.compile(r"`([^`\n]+)`")),
+            ("bold", re.compile(r"\*\*(.+?)\*\*")),
+            ("strike", re.compile(r"~~(.+?)~~")),
+            ("italic", re.compile(r"(?<!\*)\*([^*\n]+)\*(?!\*)")),
+        ]
+
+        earliest_match = None
+        earliest_kind = None
+        for kind, pattern in token_patterns:
+            match = pattern.search(value)
+            if not match:
+                continue
+            if earliest_match is None or match.start() < earliest_match.start():
+                earliest_match = match
+                earliest_kind = kind
+
+        if earliest_match is None or earliest_kind is None:
+            return [{"text": value, "annotations": annotations, "href": inherited_href}]
+
+        segments: List[Dict[str, Any]] = []
+        prefix = value[:earliest_match.start()]
+        if prefix:
+            segments.append({"text": prefix, "annotations": annotations.copy(), "href": inherited_href})
+
+        token_inner = earliest_match.group(1)
+        token_href = inherited_href
+        nested_annotations = annotations.copy()
+
+        if earliest_kind == "link":
+            token_href = earliest_match.group(2)
+        elif earliest_kind == "code":
+            nested_annotations["code"] = True
+            segments.append({"text": token_inner, "annotations": nested_annotations, "href": token_href})
+            suffix = value[earliest_match.end():]
+            if suffix:
+                segments.extend(
+                    self._parse_inline_markdown_segments(
+                        suffix,
+                        inherited_annotations=annotations,
+                        inherited_href=inherited_href,
+                        depth=depth + 1,
+                    )
+                )
+            return segments
+        elif earliest_kind == "bold":
+            nested_annotations["bold"] = True
+        elif earliest_kind == "strike":
+            nested_annotations["strikethrough"] = True
+        elif earliest_kind == "italic":
+            nested_annotations["italic"] = True
+
+        segments.extend(
+            self._parse_inline_markdown_segments(
+                token_inner,
+                inherited_annotations=nested_annotations,
+                inherited_href=token_href,
+                depth=depth + 1,
+            )
+        )
+
+        suffix = value[earliest_match.end():]
+        if suffix:
+            segments.extend(
+                self._parse_inline_markdown_segments(
+                    suffix,
+                    inherited_annotations=annotations,
+                    inherited_href=inherited_href,
+                    depth=depth + 1,
+                )
+            )
+        return segments
+
+    def _markdown_inline_to_rich_text(self, value: str) -> List[Dict[str, Any]]:
+        """Converts inline markdown (bold/italic/strike/code/links) to Notion rich_text."""
+        segments = self._parse_inline_markdown_segments(value)
+        rich_text_items: List[Dict[str, Any]] = []
+        for segment in segments:
+            text = segment.get("text", "")
+            if not text:
+                continue
+            text_payload: Dict[str, Any] = {"content": text}
+            href = segment.get("href")
+            if isinstance(href, str) and href:
+                text_payload["link"] = {"url": href}
+            rich_text_items.append(
+                {
+                    "type": "text",
+                    "text": text_payload,
+                    "annotations": segment.get("annotations", {}),
+                }
+            )
+        return self._normalize_rich_text(rich_text_items)
+
+    def _parse_markdown_table(self, lines: List[str], start_idx: int) -> Optional[tuple[Dict[str, Any], int]]:
+        """Parses a simple markdown table starting at start_idx."""
+        first = lines[start_idx].strip()
+        if "|" not in first:
+            return None
+
+        table_lines: List[str] = []
+        idx = start_idx
+        while idx < len(lines):
+            candidate = lines[idx].strip()
+            if not candidate or "|" not in candidate:
+                break
+            table_lines.append(candidate)
+            idx += 1
+
+        if len(table_lines) < 2:
+            return None
+
+        sep_line = table_lines[1].strip()
+        sep_cells = [cell.strip() for cell in sep_line.strip("|").split("|")]
+        if not sep_cells or not all(re.match(r"^:?-{3,}:?$", cell) for cell in sep_cells):
+            return None
+
+        header_cells = [cell.strip() for cell in table_lines[0].strip("|").split("|")]
+        col_count = len(header_cells)
+        if col_count == 0:
+            return None
+
+        def to_cells(raw_cells: List[str]) -> List[List[Dict[str, Any]]]:
+            normalized = raw_cells[:col_count] + ([""] * max(0, col_count - len(raw_cells)))
+            return [self._markdown_inline_to_rich_text(cell.strip()) for cell in normalized]
+
+        children = [
+            {
+                "object": "block",
+                "type": "table_row",
+                "table_row": {"cells": to_cells(header_cells)},
+            }
+        ]
+
+        for raw_line in table_lines[2:]:
+            row_cells = [cell.strip() for cell in raw_line.strip("|").split("|")]
+            children.append(
+                {
+                    "object": "block",
+                    "type": "table_row",
+                    "table_row": {"cells": to_cells(row_cells)},
+                }
+            )
+
+        return (
+            {
+                "object": "block",
+                "type": "table",
+                "table": {
+                    "table_width": col_count,
+                    "has_column_header": True,
+                    "has_row_header": False,
+                    "children": children,
+                },
+            },
+            idx,
+        )
+
+    def _markdown_to_blocks_with_blockify(self, markdown: str) -> Optional[List[Dict[str, Any]]]:
+        """Attempts conversion via notion_blockify if installed."""
+        if notion_blockify is None:
+            return None
+
+        def collect_text(blocks: List[Dict[str, Any]]) -> str:
+            texts: List[str] = []
+
+            def walk(value: Any) -> None:
+                if isinstance(value, dict):
+                    text_obj = value.get("text")
+                    if isinstance(text_obj, dict):
+                        content = text_obj.get("content")
+                        if isinstance(content, str):
+                            texts.append(content)
+                    for child in value.values():
+                        walk(child)
+                elif isinstance(value, list):
+                    for item in value:
+                        walk(item)
+
+            walk(blocks)
+            return " ".join(texts)
+
+        def is_well_parsed(converted_blocks: List[Dict[str, Any]]) -> bool:
+            extracted = collect_text(converted_blocks)
+            if "**" in markdown and "**" in extracted:
+                return False
+
+            looks_like_table = bool(re.search(r"^\s*\|.+\|\s*$", markdown, flags=re.MULTILINE)) and bool(
+                re.search(r"^\s*\|?\s*:?-{3,}:?\s*(\|\s*:?-{3,}:?\s*)+\|?\s*$", markdown, flags=re.MULTILINE)
+            )
+            if looks_like_table:
+                has_table_block = any(
+                    isinstance(block, dict) and block.get("type") == "table" for block in converted_blocks
+                )
+                if not has_table_block:
+                    return False
+            return True
+
+        candidates = (
+            "markdown_to_notion_blocks",
+            "to_notion_blocks",
+            "blockify",
+            "convert",
+        )
+        for attr_name in candidates:
+            converter = getattr(notion_blockify, attr_name, None)
+            if not callable(converter):
+                continue
+            try:
+                converted = converter(markdown)
+            except Exception:
+                continue
+            if isinstance(converted, list):
+                return converted if is_well_parsed(converted) else None
+            if isinstance(converted, dict):
+                for key in ("blocks", "children", "results"):
+                    value = converted.get(key)
+                    if isinstance(value, list):
+                        return value if is_well_parsed(value) else None
+        return None
+
     def _markdown_to_blocks(self, markdown: str) -> List[Dict[str, Any]]:
         """Converts markdown into a basic list of Notion block objects."""
+        converted_by_blockify = self._markdown_to_blocks_with_blockify(markdown)
+        if isinstance(converted_by_blockify, list):
+            return converted_by_blockify
+
         lines = markdown.splitlines()
         blocks: List[Dict[str, Any]] = []
         paragraph_lines: List[str] = []
@@ -355,7 +626,7 @@ class NotionHelper:
                 {
                     "object": "block",
                     "type": "paragraph",
-                    "paragraph": {"rich_text": self._plain_text_rich_text(text)},
+                    "paragraph": {"rich_text": self._markdown_inline_to_rich_text(text)},
                 }
             )
 
@@ -363,7 +634,9 @@ class NotionHelper:
         code_language = "plain text"
         code_lines: List[str] = []
 
-        for line in lines:
+        line_idx = 0
+        while line_idx < len(lines):
+            line = lines[line_idx]
             stripped = line.strip()
 
             if in_code_fence:
@@ -383,6 +656,7 @@ class NotionHelper:
                     code_lines = []
                 else:
                     code_lines.append(line.rstrip("\n"))
+                line_idx += 1
                 continue
 
             fence_match = re.match(r"^```([a-zA-Z0-9_+\- ]*)\s*$", stripped)
@@ -392,10 +666,12 @@ class NotionHelper:
                 parsed_language = fence_match.group(1).strip()
                 code_language = parsed_language if parsed_language else "plain text"
                 code_lines = []
+                line_idx += 1
                 continue
 
             if not stripped:
                 flush_paragraph()
+                line_idx += 1
                 continue
 
             heading_match = re.match(r"^(#{1,6})\s+(.*)$", stripped)
@@ -407,14 +683,16 @@ class NotionHelper:
                     {
                         "object": "block",
                         "type": f"heading_{level}",
-                        f"heading_{level}": {"rich_text": self._plain_text_rich_text(text)},
+                        f"heading_{level}": {"rich_text": self._markdown_inline_to_rich_text(text)},
                     }
                 )
+                line_idx += 1
                 continue
 
             if re.match(r"^([-*_])(?:\s*\1){2,}\s*$", stripped):
                 flush_paragraph()
                 blocks.append({"object": "block", "type": "divider", "divider": {}})
+                line_idx += 1
                 continue
 
             quote_match = re.match(r"^>\s?(.*)$", stripped)
@@ -424,9 +702,10 @@ class NotionHelper:
                     {
                         "object": "block",
                         "type": "quote",
-                        "quote": {"rich_text": self._plain_text_rich_text(quote_match.group(1).strip())},
+                        "quote": {"rich_text": self._markdown_inline_to_rich_text(quote_match.group(1).strip())},
                     }
                 )
+                line_idx += 1
                 continue
 
             unordered_match = re.match(r"^[-*+]\s+(.*)$", stripped)
@@ -437,10 +716,11 @@ class NotionHelper:
                         "object": "block",
                         "type": "bulleted_list_item",
                         "bulleted_list_item": {
-                            "rich_text": self._plain_text_rich_text(unordered_match.group(1).strip())
+                            "rich_text": self._markdown_inline_to_rich_text(unordered_match.group(1).strip())
                         },
                     }
                 )
+                line_idx += 1
                 continue
 
             ordered_match = re.match(r"^\d+\.\s+(.*)$", stripped)
@@ -451,13 +731,23 @@ class NotionHelper:
                         "object": "block",
                         "type": "numbered_list_item",
                         "numbered_list_item": {
-                            "rich_text": self._plain_text_rich_text(ordered_match.group(1).strip())
+                            "rich_text": self._markdown_inline_to_rich_text(ordered_match.group(1).strip())
                         },
                     }
                 )
+                line_idx += 1
+                continue
+
+            table_parse = self._parse_markdown_table(lines, line_idx)
+            if table_parse:
+                flush_paragraph()
+                table_block, next_idx = table_parse
+                blocks.append(table_block)
+                line_idx = next_idx
                 continue
 
             paragraph_lines.append(line)
+            line_idx += 1
 
         if in_code_fence:
             blocks.append(
@@ -746,6 +1036,28 @@ class NotionHelper:
                     markdown_lines.append(f"[{block_type}]({media_url})")
                     markdown_lines.append("")
 
+            elif block_type == "table":
+                table_rows = block_data.get("children", [])
+                if not isinstance(table_rows, list):
+                    table_rows = []
+                rendered_rows: List[List[str]] = []
+                for row_block in table_rows:
+                    row_data = row_block.get("table_row", {}) if isinstance(row_block, dict) else {}
+                    cells = row_data.get("cells", []) if isinstance(row_data, dict) else []
+                    if not isinstance(cells, list):
+                        continue
+                    rendered_rows.append(
+                        [self._extract_rich_text(cell) if isinstance(cell, list) else "" for cell in cells]
+                    )
+                if rendered_rows:
+                    header = rendered_rows[0]
+                    markdown_lines.append(f"| {' | '.join(header)} |")
+                    markdown_lines.append(f"| {' | '.join(['---'] * len(header))} |")
+                    for row in rendered_rows[1:]:
+                        padded = row[:len(header)] + ([""] * max(0, len(header) - len(row)))
+                        markdown_lines.append(f"| {' | '.join(padded)} |")
+                    markdown_lines.append("")
+
         return "\n".join(markdown_lines).strip()
 
     def _extract_rich_text(self, rich_text_array: List[Dict[str, Any]]) -> str:
@@ -823,6 +1135,40 @@ class NotionHelper:
             next_cursor = blocks.get("next_cursor")
             if not next_cursor:
                 break
+
+        def hydrate_children(blocks: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+            hydrated: List[Dict[str, Any]] = []
+            for block in blocks:
+                if not isinstance(block, dict):
+                    continue
+                if block.get("has_children") and block.get("id"):
+                    block_id = block["id"]
+                    child_url = f"https://api.notion.com/v1/blocks/{block_id}/children"
+                    children: List[Dict[str, Any]] = []
+                    child_cursor = None
+                    while True:
+                        child_params = {"page_size": 100}
+                        if child_cursor:
+                            child_params["start_cursor"] = child_cursor
+                        child_resp = self._make_request("GET", child_url, params=child_params)
+                        children.extend(child_resp.get("results", []))
+                        if not child_resp.get("has_more"):
+                            break
+                        child_cursor = child_resp.get("next_cursor")
+                        if not child_cursor:
+                            break
+
+                    children = hydrate_children(children)
+                    block_type = block.get("type")
+                    if isinstance(block_type, str):
+                        block_payload = block.get(block_type, {})
+                        if isinstance(block_payload, dict):
+                            block_payload["children"] = children
+                            block[block_type] = block_payload
+                hydrated.append(block)
+            return hydrated
+
+        content_blocks = hydrate_children(content_blocks)
 
         # Extract all properties as a JSON object
         properties = page.get("properties", {})
