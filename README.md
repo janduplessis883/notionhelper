@@ -174,6 +174,9 @@ markdown_content = result["content"]  # String in markdown format
 print(markdown_content)
 ```
 
+Use `return_markdown` as the canonical parameter name. Deprecated aliases
+`returnmarkdown` and `markdownformat` are still accepted with warnings.
+
 The markdown conversion supports:
 - **Headings** (H1, H2, H3)
 - **Text formatting** (bold, italic, strikethrough, code, links)
@@ -195,6 +198,43 @@ This is useful for:
 data_source_id = "your_data_source_id" # The ID of the specific data source (table)
 df = helper.get_data_source_pages_as_dataframe(data_source_id)
 print(df.head())
+```
+
+#### Timezone-safe filtering example
+
+```python
+import pandas as pd
+
+data_source_id = "your_data_source_id"
+df = helper.get_data_source_pages_as_dataframe(data_source_id, utc=True)
+
+# Due values are normalized to ISO 8601; parse with utc=True for stable comparisons
+due_ts = pd.to_datetime(df["Due"], utc=True, errors="coerce")
+window_start = pd.Timestamp("2026-03-01T00:00:00Z")
+window_end = pd.Timestamp("2026-03-08T00:00:00Z")
+filtered = df[(due_ts >= window_start) & (due_ts < window_end)]
+print(filtered[["Name", "Due"]])
+```
+
+#### Streaming pages before DataFrame conversion
+
+```python
+for page in helper.iter_data_source_pages("your_data_source_id", page_size=50):
+    print(page["id"])
+```
+
+#### Retry policy (global + per-call override)
+
+```python
+from notionhelper import RetryPolicy
+
+helper.set_retry_policy(RetryPolicy(max_retries=4, base_delay=0.5, jitter_ratio=0.25, timeout=20))
+
+# Per-call override
+rows = helper.get_data_source_pages_as_dataframe(
+    "your_data_source_id",
+    retry_policy=RetryPolicy(max_retries=1, base_delay=0.2, jitter_ratio=0.1, timeout=10),
+)
 ```
 
 ### Update a Data Source
@@ -502,19 +542,31 @@ The `NotionHelper` class provides the following methods:
 - **`trash_page(page_id)`** - Moves a page to Notion trash.
 - **`restore_page(page_id)`** - Restores a page from Notion trash.
 - **`append_page_body(page_id, body=None, sanitize=True, blocks=None, batch_size=100)`** - Appends either Notion blocks (`list[dict]`) or raw Markdown (`str`) to a Notion page body with optional sanitization and automatic batching.
-- **`get_page(page_id)`** - Retrieves the JSON of the page properties and an array of blocks on a Notion page given its page_id.
+- **`get_page(page_id, return_markdown=False)`** - Retrieves page properties and page content; use `return_markdown=True` for markdown output. Deprecated aliases `returnmarkdown` and `markdownformat` remain temporarily supported with warnings.
 - **`extract_page_id_from_url(page_url_or_id, with_hyphens=True)`** - Extracts and normalizes a Notion page ID from either a Notion URL or raw ID.
 
 ### Data Retrieval & Conversion
 - **`get_data_source_page_ids(data_source_id)`** - Returns the IDs of all pages in a given data source.
 - **`get_data_source_pages_as_json(data_source_id, limit=None)`** - Returns a list of JSON objects representing all pages in the given data source, with all properties.
-- **`get_data_source_pages_as_dataframe(data_source_id, limit=None, include_page_ids=True)`** - Retrieves all pages from a Notion data source and returns them as a Pandas DataFrame.
+- **`get_data_source_pages_as_dataframe(data_source_id, limit=None, include_page_ids=True, utc=True)`** - Retrieves all pages as a Pandas DataFrame with timezone-safe UTC ISO 8601 normalization by default.
+- **`iter_data_source_pages(data_source_id, ...)`** - Streams paginated page payloads as a generator.
+- **`iter_data_source_page_records(data_source_id, ...)`** - Streams flattened records before DataFrame conversion.
+- **`parse_datetime_utc(value, utc=True)`** - Parses datetime-like values into pandas timestamps with UTC-safe defaults.
+- **`normalize_datetime_iso(value, utc=True)`** - Normalizes datetime-like values to ISO 8601 strings (UTC by default for datetimes).
+- **`normalize_notion_date(date_value, utc=True)`** - Normalizes Notion date objects (`start`, `end`, `time_zone`) to consistent ISO 8601 output.
+- **`set_converter_adapter(converter_adapter)`** - Sets a converter adapter so application code can use a single wrapper for markdown <-> block conversion.
+- **`set_retry_policy(retry_policy)`** - Sets the global retry policy (max retries, timeout, backoff, jitter, retry statuses).
 
 ### File Operations
 - **`upload_file(file_path)`** - Uploads a file to Notion and returns the file upload object
 - **`attach_file_to_page(page_id, file_upload_id)`** - Attaches an uploaded file to a specific page
 - **`embed_image_to_page(page_id, file_upload_id)`** - Embeds an uploaded image into a page
 - **`attach_file_to_page_property(page_id, property_name, file_upload_id, file_name)`** - Attaches a file to a Files & Media property
+
+### Error Handling
+- Structured exceptions include metadata (`status_code`, `request_path`, `notion_code`):
+- `AuthError`, `RateLimitError`, `NotFoundError`, `ValidationError`, `TimeoutError`
+- Base class: `NotionAPIError`
 
 ### One-Step Convenience Methods
 - **`one_step_image_embed(page_id, file_path)`** - Uploads and embeds an image in one operation
@@ -533,3 +585,6 @@ The `NotionHelper` class provides the following methods:
 - pandas >= 2.3.1
 - requests >= 2.32.4
 - mimetype >= 0.1.5
+
+Optional for richer markdown import:
+- notion-blockify

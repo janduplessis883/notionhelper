@@ -1,9 +1,10 @@
 import logging
 from unittest.mock import Mock, patch
 
+import pytest
 import requests
 
-from notionhelper import NotionHelper
+from notionhelper import NotionHelper, RetryPolicy
 
 
 def _paragraph_block(text: str) -> dict:
@@ -68,8 +69,44 @@ def test_get_page_paginates_blocks_children_endpoint():
     }
 
 
+def test_get_page_accepts_deprecated_returnmarkdown_alias_with_warning():
+    helper = NotionHelper("token")
+
+    with patch.object(NotionHelper, "_make_request") as mock_request:
+        mock_request.side_effect = [
+            {"properties": {"Name": {"title": []}}},
+            {"results": [], "has_more": False, "next_cursor": None},
+        ]
+        with pytest.warns(FutureWarning, match="return_markdown"):
+            result = helper.get_page("page-id", returnmarkdown=True)
+
+    assert isinstance(result["content"], str)
+
+
+def test_get_page_accepts_deprecated_markdownformat_alias_with_warning():
+    helper = NotionHelper("token")
+
+    with patch.object(NotionHelper, "_make_request") as mock_request:
+        mock_request.side_effect = [
+            {"properties": {"Name": {"title": []}}},
+            {"results": [], "has_more": False, "next_cursor": None},
+        ]
+        with pytest.warns(FutureWarning, match="return_markdown"):
+            result = helper.get_page("page-id", markdownformat=True)
+
+    assert isinstance(result["content"], str)
+
+
+def test_get_page_raises_on_conflicting_canonical_and_alias_values():
+    helper = NotionHelper("token")
+
+    with pytest.warns(FutureWarning, match="return_markdown"):
+        with pytest.raises(ValueError, match="Conflicting values"):
+            helper.get_page("page-id", return_markdown=True, markdownformat=False)
+
+
 def test_make_request_retries_on_429_with_retry_after():
-    helper = NotionHelper("token", max_retries=2)
+    helper = NotionHelper("token", retry_policy=RetryPolicy(max_retries=2, jitter_ratio=0.0))
     retry_response = Mock()
     retry_response.status_code = 429
     retry_response.headers = {"Retry-After": "2"}
@@ -91,7 +128,10 @@ def test_make_request_retries_on_429_with_retry_after():
 
 
 def test_make_request_retries_transient_request_exception():
-    helper = NotionHelper("token", max_retries=1, retry_base_delay=0.5)
+    helper = NotionHelper(
+        "token",
+        retry_policy=RetryPolicy(max_retries=1, base_delay=0.5, jitter_ratio=0.0),
+    )
     success_response = Mock()
     success_response.status_code = 200
     success_response.headers = {}

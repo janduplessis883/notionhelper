@@ -1,4 +1,4 @@
-from typing import Optional, Dict, List, Any, Union
+from typing import Optional, Dict, List, Any, Union, Iterator
 import pandas as pd
 import os
 import requests
@@ -7,14 +7,21 @@ import json
 import re
 import time
 import logging
+import warnings
 from urllib.parse import urlparse, parse_qs
 from datetime import datetime
 import numpy as np
 
-try:
-    import notion_blockify  # type: ignore
-except ImportError:
-    notion_blockify = None
+from .converter_adapter import ConverterAdapter, InternalConverterAdapter, NotionBlockifyAdapter
+from .retry_policy import RetryPolicy
+from .errors import (
+    NotionAPIError,
+    AuthError,
+    RateLimitError,
+    NotFoundError,
+    ValidationError,
+    TimeoutError,
+)
 
 
 # NotionHelper can be used in conjunction with the Streamlit APP: (Notion API JSON)[https://notioinapiassistant.streamlit.app]
@@ -86,6 +93,8 @@ class NotionHelper:
         max_retries: int = 3,
         retry_base_delay: float = 1.0,
         request_timeout: float = 30.0,
+        converter_adapter: Optional[ConverterAdapter] = None,
+        retry_policy: Optional[RetryPolicy] = None,
     ):
         """Initializes the NotionHelper instance with the provided token.
 
@@ -95,12 +104,22 @@ class NotionHelper:
             max_retries (int): Number of retries for 429/5xx and transient request failures.
             retry_base_delay (float): Base delay (seconds) for exponential backoff.
             request_timeout (float): Timeout (seconds) for HTTP requests.
+            converter_adapter (ConverterAdapter, optional): Custom markdown/block conversion adapter.
+            retry_policy (RetryPolicy, optional): Global retry policy; overrides retry params when provided.
         """
         self.notion_token = notion_token
         self.debug = debug
-        self.max_retries = max(0, max_retries)
-        self.retry_base_delay = max(0.1, retry_base_delay)
-        self.request_timeout = max(1.0, request_timeout)
+        if retry_policy is None:
+            retry_policy = RetryPolicy(
+                max_retries=max_retries,
+                base_delay=retry_base_delay,
+                timeout=request_timeout,
+            )
+        self.retry_policy = retry_policy.clamp()
+        # Backward-compatible attributes retained for callers that read these values directly.
+        self.max_retries = self.retry_policy.max_retries
+        self.retry_base_delay = self.retry_policy.base_delay
+        self.request_timeout = self.retry_policy.timeout
         self._supported_block_types = {
             "bookmark",
             "breadcrumb",
@@ -133,10 +152,85 @@ class NotionHelper:
             "toggle",
             "video",
         }
+        self._converter_adapter = converter_adapter or self._build_default_converter_adapter()
+
+    def set_retry_policy(self, retry_policy: RetryPolicy) -> None:
+        """Overrides the active retry policy."""
+        self.retry_policy = retry_policy.clamp()
+        self.max_retries = self.retry_policy.max_retries
+        self.retry_base_delay = self.retry_policy.base_delay
+        self.request_timeout = self.retry_policy.timeout
+
+    def _build_default_converter_adapter(self) -> ConverterAdapter:
+        """Builds the default conversion adapter stack."""
+        fallback = InternalConverterAdapter(
+            markdown_to_blocks_fn=self._internal_markdown_to_blocks,
+            blocks_to_markdown_fn=self._blocks_to_markdown,
+        )
+        return NotionBlockifyAdapter(fallback=fallback)
+
+    def set_converter_adapter(self, converter_adapter: ConverterAdapter) -> None:
+        """Overrides the active conversion adapter."""
+        self._converter_adapter = converter_adapter
 
     def _utf16_units(self, value: str) -> int:
         """Returns the number of UTF-16 code units in a string."""
         return len(value.encode("utf-16-le")) // 2
+
+    def parse_datetime_utc(self, value: Any, utc: bool = True) -> Optional[pd.Timestamp]:
+        """Parses a datetime-like value to a pandas Timestamp with UTC-safe defaults."""
+        if value is None:
+            return None
+        try:
+            parsed = pd.to_datetime(value, utc=utc, errors="coerce")
+        except Exception:
+            return None
+        if pd.isna(parsed):
+            return None
+        if isinstance(parsed, pd.DatetimeIndex):
+            return parsed[0] if len(parsed) else None
+        return parsed
+
+    def normalize_datetime_iso(self, value: Any, utc: bool = True) -> str:
+        """Normalizes datetime-like values to ISO 8601 strings.
+
+        Date-only values stay as YYYY-MM-DD. Datetime values are normalized to UTC
+        and serialized with a trailing Z when utc=True.
+        """
+        if value is None:
+            return ""
+        if isinstance(value, str):
+            stripped = value.strip()
+            if not stripped:
+                return ""
+            if re.fullmatch(r"\d{4}-\d{2}-\d{2}", stripped):
+                return stripped
+        parsed = self.parse_datetime_utc(value, utc=utc)
+        if parsed is None:
+            return ""
+        iso_value = parsed.isoformat()
+        if utc:
+            iso_value = iso_value.replace("+00:00", "Z")
+        return iso_value
+
+    def normalize_notion_date(self, date_value: Optional[Dict[str, Any]], utc: bool = True) -> Dict[str, Any]:
+        """Normalizes a Notion date object (`start`, `end`, `time_zone`) to ISO 8601."""
+        if not isinstance(date_value, dict):
+            return {}
+        normalized_start = self.normalize_datetime_iso(date_value.get("start"), utc=utc)
+        normalized_end = self.normalize_datetime_iso(date_value.get("end"), utc=utc)
+        normalized: Dict[str, Any] = {
+            "start": normalized_start or None,
+            "end": normalized_end or None,
+            "time_zone": date_value.get("time_zone"),
+        }
+        has_datetime = bool(
+            (normalized_start and "T" in normalized_start) or
+            (normalized_end and "T" in normalized_end)
+        )
+        if utc and has_datetime:
+            normalized["time_zone"] = "UTC"
+        return normalized
 
     def _normalize_notion_id(self, value: str, with_hyphens: bool = True) -> Optional[str]:
         """Normalizes a Notion UUID/hex ID to either 32-char or hyphenated UUID format."""
@@ -542,75 +636,12 @@ class NotionHelper:
             idx,
         )
 
-    def _markdown_to_blocks_with_blockify(self, markdown: str) -> Optional[List[Dict[str, Any]]]:
-        """Attempts conversion via notion_blockify if installed."""
-        if notion_blockify is None:
-            return None
-
-        def collect_text(blocks: List[Dict[str, Any]]) -> str:
-            texts: List[str] = []
-
-            def walk(value: Any) -> None:
-                if isinstance(value, dict):
-                    text_obj = value.get("text")
-                    if isinstance(text_obj, dict):
-                        content = text_obj.get("content")
-                        if isinstance(content, str):
-                            texts.append(content)
-                    for child in value.values():
-                        walk(child)
-                elif isinstance(value, list):
-                    for item in value:
-                        walk(item)
-
-            walk(blocks)
-            return " ".join(texts)
-
-        def is_well_parsed(converted_blocks: List[Dict[str, Any]]) -> bool:
-            extracted = collect_text(converted_blocks)
-            if "**" in markdown and "**" in extracted:
-                return False
-
-            looks_like_table = bool(re.search(r"^\s*\|.+\|\s*$", markdown, flags=re.MULTILINE)) and bool(
-                re.search(r"^\s*\|?\s*:?-{3,}:?\s*(\|\s*:?-{3,}:?\s*)+\|?\s*$", markdown, flags=re.MULTILINE)
-            )
-            if looks_like_table:
-                has_table_block = any(
-                    isinstance(block, dict) and block.get("type") == "table" for block in converted_blocks
-                )
-                if not has_table_block:
-                    return False
-            return True
-
-        candidates = (
-            "markdown_to_notion_blocks",
-            "to_notion_blocks",
-            "blockify",
-            "convert",
-        )
-        for attr_name in candidates:
-            converter = getattr(notion_blockify, attr_name, None)
-            if not callable(converter):
-                continue
-            try:
-                converted = converter(markdown)
-            except Exception:
-                continue
-            if isinstance(converted, list):
-                return converted if is_well_parsed(converted) else None
-            if isinstance(converted, dict):
-                for key in ("blocks", "children", "results"):
-                    value = converted.get(key)
-                    if isinstance(value, list):
-                        return value if is_well_parsed(value) else None
-        return None
-
     def _markdown_to_blocks(self, markdown: str) -> List[Dict[str, Any]]:
-        """Converts markdown into a basic list of Notion block objects."""
-        converted_by_blockify = self._markdown_to_blocks_with_blockify(markdown)
-        if isinstance(converted_by_blockify, list):
-            return converted_by_blockify
+        """Converts markdown to Notion blocks through the configured adapter."""
+        return self._converter_adapter.markdown_to_blocks(markdown)
 
+    def _internal_markdown_to_blocks(self, markdown: str) -> List[Dict[str, Any]]:
+        """Internal markdown parser for critical block types."""
         lines = markdown.splitlines()
         blocks: List[Dict[str, Any]] = []
         paragraph_lines: List[str] = []
@@ -771,20 +802,23 @@ class NotionHelper:
         payload: Optional[Dict[str, Any]] = None,
         api_version: str = "2025-09-03",
         params: Optional[Dict[str, Any]] = None,
+        retry_policy: Optional[RetryPolicy] = None,
+        request_timeout: Optional[float] = None,
     ) -> Dict[str, Any]:
         """
         Internal helper to make authenticated requests to the Notion API.
-        Handles headers, JSON serialization, retries/backoff, and error reporting.
+        Handles headers, JSON serialization, retries/backoff, and structured error reporting.
         """
+        effective_policy = self._build_retry_policy(retry_policy, request_timeout)
         headers = {
             "Authorization": f"Bearer {self.notion_token}",
             "Content-Type": "application/json",
             "Notion-Version": api_version,
         }
-        response = None
         request_method = method.upper()
         if request_method not in {"GET", "POST", "PATCH"}:
             raise ValueError(f"Unsupported HTTP method: {method}")
+        request_path = urlparse(url).path
 
         if self.debug:
             LOGGER.debug(
@@ -795,36 +829,40 @@ class NotionHelper:
                 sorted(payload.keys()) if isinstance(payload, dict) else None,
             )
 
-        for attempt in range(self.max_retries + 1):
+        for attempt in range(effective_policy.max_retries + 1):
+            response = None
             try:
                 if request_method == "GET":
                     response = requests.get(
                         url,
                         headers=headers,
                         params=params,
-                        timeout=self.request_timeout,
+                        timeout=effective_policy.timeout,
                     )
                 elif request_method == "POST":
                     response = requests.post(
                         url,
                         headers=headers,
                         data=json.dumps(payload),
-                        timeout=self.request_timeout,
+                        timeout=effective_policy.timeout,
                     )
                 else:
                     response = requests.patch(
                         url,
                         headers=headers,
                         data=json.dumps(payload),
-                        timeout=self.request_timeout,
+                        timeout=effective_policy.timeout,
                     )
 
-                if response.status_code in {429, 500, 502, 503, 504} and attempt < self.max_retries:
-                    retry_after = response.headers.get("Retry-After")
-                    try:
-                        delay = float(retry_after) if retry_after else self.retry_base_delay * (2 ** attempt)
-                    except ValueError:
-                        delay = self.retry_base_delay * (2 ** attempt)
+                if response.status_code in effective_policy.retry_statuses and attempt < effective_policy.max_retries:
+                    retry_after = response.headers.get("Retry-After") if response.headers else None
+                    retry_after_value: Optional[float] = None
+                    if retry_after:
+                        try:
+                            retry_after_value = float(retry_after)
+                        except ValueError:
+                            retry_after_value = None
+                    delay = effective_policy.compute_delay(attempt, retry_after=retry_after_value)
                     LOGGER.warning(
                         "Transient Notion error status=%s on %s %s. Retrying in %.2fs (attempt %s/%s).",
                         response.status_code,
@@ -832,21 +870,59 @@ class NotionHelper:
                         url,
                         delay,
                         attempt + 1,
-                        self.max_retries,
+                        effective_policy.max_retries,
                     )
                     time.sleep(delay)
                     continue
 
-                response.raise_for_status()
-                try:
-                    return response.json()
-                except ValueError:
-                    return {}
+                if 200 <= response.status_code < 300:
+                    try:
+                        return response.json()
+                    except ValueError:
+                        return {}
 
+                error = self._classify_api_error(response, request_path)
+                if attempt < effective_policy.max_retries and response.status_code in effective_policy.retry_statuses:
+                    delay = effective_policy.compute_delay(attempt)
+                    LOGGER.warning(
+                        "Request failed on %s %s with %s. Retrying in %.2fs (attempt %s/%s).",
+                        request_method,
+                        url,
+                        error,
+                        delay,
+                        attempt + 1,
+                        effective_policy.max_retries,
+                    )
+                    time.sleep(delay)
+                    continue
+                self._log_bad_child_block(payload, response)
+                raise error
+
+            except requests.exceptions.Timeout as req_err:
+                is_last_attempt = attempt >= effective_policy.max_retries
+                if not is_last_attempt and effective_policy.retry_on_timeout:
+                    delay = effective_policy.compute_delay(attempt)
+                    LOGGER.warning(
+                        "Timeout on %s %s: %s. Retrying in %.2fs (attempt %s/%s).",
+                        request_method,
+                        url,
+                        req_err,
+                        delay,
+                        attempt + 1,
+                        effective_policy.max_retries,
+                    )
+                    time.sleep(delay)
+                    continue
+                raise TimeoutError(
+                    "Notion API request timed out",
+                    status_code=None,
+                    request_path=request_path,
+                    notion_code=None,
+                ) from req_err
             except requests.exceptions.RequestException as req_err:
-                is_last_attempt = attempt >= self.max_retries
-                if not is_last_attempt:
-                    delay = self.retry_base_delay * (2 ** attempt)
+                is_last_attempt = attempt >= effective_policy.max_retries
+                if not is_last_attempt and effective_policy.retry_on_connection_error:
+                    delay = effective_policy.compute_delay(attempt)
                     LOGGER.warning(
                         "Request error on %s %s: %s. Retrying in %.2fs (attempt %s/%s).",
                         request_method,
@@ -854,41 +930,103 @@ class NotionHelper:
                         req_err,
                         delay,
                         attempt + 1,
-                        self.max_retries,
+                        effective_policy.max_retries,
                     )
                     time.sleep(delay)
                     continue
-
-                response_body = response.text if response is not None else None
-                LOGGER.error(
-                    "Notion API request failed method=%s url=%s status=%s error=%s response=%s",
-                    request_method,
-                    url,
-                    response.status_code if response is not None else None,
-                    req_err,
-                    response_body,
-                )
-
-                if response is not None and payload and isinstance(payload.get("children"), list):
-                    message = ""
-                    try:
-                        err_json = response.json()
-                        message = err_json.get("message", "") if isinstance(err_json, dict) else ""
-                    except ValueError:
-                        message = response.text
-
-                    block_index_match = re.search(r"children\[(\d+)\]", message or "")
-                    if block_index_match:
-                        bad_index = int(block_index_match.group(1))
-                        if 0 <= bad_index < len(payload["children"]):
-                            LOGGER.error(
-                                "Likely failing child block at index %s: %s",
-                                bad_index,
-                                json.dumps(payload["children"][bad_index], indent=2),
-                            )
-                raise
+                raise NotionAPIError(
+                    "Notion API request failed",
+                    status_code=response.status_code if response is not None else None,
+                    request_path=request_path,
+                    notion_code=None,
+                ) from req_err
 
         raise RuntimeError("Request retry loop exited unexpectedly")
+
+    def _build_retry_policy(
+        self,
+        retry_policy: Optional[RetryPolicy] = None,
+        request_timeout: Optional[float] = None,
+    ) -> RetryPolicy:
+        """Builds the effective retry policy for a request."""
+        if retry_policy is not None:
+            policy = RetryPolicy(
+                max_retries=retry_policy.max_retries,
+                base_delay=retry_policy.base_delay,
+                max_delay=retry_policy.max_delay,
+                jitter_ratio=retry_policy.jitter_ratio,
+                timeout=retry_policy.timeout,
+                retry_statuses=set(retry_policy.retry_statuses),
+                retry_on_timeout=retry_policy.retry_on_timeout,
+                retry_on_connection_error=retry_policy.retry_on_connection_error,
+            )
+        else:
+            policy = RetryPolicy(
+                max_retries=self.retry_policy.max_retries,
+                base_delay=self.retry_policy.base_delay,
+                max_delay=self.retry_policy.max_delay,
+                jitter_ratio=self.retry_policy.jitter_ratio,
+                timeout=self.retry_policy.timeout,
+                retry_statuses=set(self.retry_policy.retry_statuses),
+                retry_on_timeout=self.retry_policy.retry_on_timeout,
+                retry_on_connection_error=self.retry_policy.retry_on_connection_error,
+            )
+        if request_timeout is not None:
+            policy.timeout = request_timeout
+        return policy.clamp()
+
+    def _parse_error_payload(self, response: requests.Response) -> Dict[str, Any]:
+        """Extracts error metadata from a Notion API response."""
+        try:
+            payload = response.json()
+            if isinstance(payload, dict):
+                return payload
+        except ValueError:
+            pass
+        return {}
+
+    def _classify_api_error(self, response: requests.Response, request_path: str) -> NotionAPIError:
+        """Maps HTTP/status payload errors to structured exceptions."""
+        error_payload = self._parse_error_payload(response)
+        notion_code = error_payload.get("code")
+        message = (
+            error_payload.get("message")
+            if isinstance(error_payload.get("message"), str)
+            else f"Notion API error status={response.status_code}"
+        )
+        status_code = response.status_code
+
+        if status_code in {401, 403}:
+            return AuthError(message, status_code=status_code, request_path=request_path, notion_code=notion_code)
+        if status_code == 429 or notion_code == "rate_limited":
+            return RateLimitError(message, status_code=status_code, request_path=request_path, notion_code=notion_code)
+        if status_code == 404 or notion_code == "object_not_found":
+            return NotFoundError(message, status_code=status_code, request_path=request_path, notion_code=notion_code)
+        if status_code in {400, 422} or notion_code == "validation_error":
+            return ValidationError(message, status_code=status_code, request_path=request_path, notion_code=notion_code)
+        return NotionAPIError(message, status_code=status_code, request_path=request_path, notion_code=notion_code)
+
+    def _log_bad_child_block(self, payload: Optional[Dict[str, Any]], response: Optional[requests.Response]) -> None:
+        """Logs likely failing child block for append payload diagnostics."""
+        if response is None or not payload or not isinstance(payload.get("children"), list):
+            return
+        message = ""
+        try:
+            err_json = response.json()
+            message = err_json.get("message", "") if isinstance(err_json, dict) else ""
+        except ValueError:
+            message = response.text
+
+        block_index_match = re.search(r"children\[(\d+)\]", message or "")
+        if not block_index_match:
+            return
+        bad_index = int(block_index_match.group(1))
+        if 0 <= bad_index < len(payload["children"]):
+            LOGGER.error(
+                "Likely failing child block at index %s: %s",
+                bad_index,
+                json.dumps(payload["children"][bad_index], indent=2),
+            )
 
     def get_database(self, database_id: str) -> Dict[str, Any]:
         """Retrieves the schema of a Notion database given its database_id.
@@ -1105,16 +1243,53 @@ class NotionHelper:
 
         return "".join(result)
 
-    def get_page(self, page_id: str, return_markdown: bool = False) -> Dict[str, Any]:
+    def get_page(self, page_id: str, return_markdown: bool = False, **kwargs: Any) -> Dict[str, Any]:
         """Retrieves the JSON of the page properties and an array of blocks on a Notion page given its page_id.
 
         Parameters:
             page_id (str): The ID of the Notion page
-            return_markdown (bool): If True, converts blocks to markdown. If False, returns raw JSON. Defaults to False.
+            return_markdown (bool): Canonical flag. If True, converts blocks to markdown.
+            **kwargs: Deprecated aliases accepted for compatibility:
+                - returnmarkdown
+                - returnMarkdown
+                - markdownformat
+                - markdown_format
+                - markdownFormat
 
         Returns:
             dict: Dictionary with 'properties' and 'content' (as JSON or markdown string)
         """
+        alias_map = {
+            "returnmarkdown": "return_markdown",
+            "returnMarkdown": "return_markdown",
+            "markdownformat": "return_markdown",
+            "markdown_format": "return_markdown",
+            "markdownFormat": "return_markdown",
+        }
+
+        for alias, canonical in alias_map.items():
+            if alias not in kwargs:
+                continue
+
+            alias_value = bool(kwargs.pop(alias))
+            warnings.warn(
+                (
+                    f"`{alias}` is deprecated and will be removed in a future release. "
+                    f"Use `{canonical}` instead."
+                ),
+                FutureWarning,
+                stacklevel=2,
+            )
+            if return_markdown != alias_value:
+                if return_markdown is not False:
+                    raise ValueError(
+                        f"Conflicting values for `{canonical}` and deprecated alias `{alias}`."
+                    )
+            return_markdown = alias_value
+
+        if kwargs:
+            unknown = ", ".join(sorted(kwargs.keys()))
+            raise TypeError(f"get_page() got unexpected keyword argument(s): {unknown}")
 
         # Retrieve the page properties
         page_url = f"https://api.notion.com/v1/pages/{page_id}"
@@ -1175,7 +1350,7 @@ class NotionHelper:
 
         # Convert to markdown if requested
         if return_markdown:
-            content = self._blocks_to_markdown(content_blocks)
+            content = self._converter_adapter.blocks_to_markdown(content_blocks)
         else:
             content = content_blocks
 
@@ -1344,108 +1519,113 @@ class NotionHelper:
             "responses": responses,
         }
 
-    def get_data_source_page_ids(self, data_source_id: str) -> List[str]:
-        """Returns the IDs of all pages in a given data source.
-        With API version 2025-09-03, this queries a data source, not a database.
-        """
+    def iter_data_source_pages(
+        self,
+        data_source_id: str,
+        limit: Optional[int] = None,
+        page_size: int = 100,
+        start_cursor: Optional[str] = None,
+        retry_policy: Optional[RetryPolicy] = None,
+        request_timeout: Optional[float] = None,
+    ) -> Iterator[Dict[str, Any]]:
+        """Yields pages from a data source incrementally using cursor pagination."""
+        if page_size < 1:
+            raise ValueError("page_size must be >= 1")
+        page_size = min(page_size, 100)
+        if limit is not None and limit < 0:
+            raise ValueError("limit must be >= 0")
+        if limit == 0:
+            return
+
         url = f"https://api.notion.com/v1/data_sources/{data_source_id}/query"
-        pages_json = []
         has_more = True
-        start_cursor = None
+        cursor = start_cursor
+        yielded = 0
 
         while has_more:
-            payload = {}
-            if start_cursor:
-                payload["start_cursor"] = start_cursor
-
-            response = self._make_request("POST", url, payload)
-            pages_json.extend(response["results"])
-            has_more = response.get("has_more", False)
-            start_cursor = response.get("next_cursor", None)
-
-        page_ids = [page["id"] for page in pages_json]
-        return page_ids
-
-    def get_data_source_pages_as_json(self, data_source_id: str, limit: Optional[int] = None) -> List[Dict[str, Any]]:
-        """Returns a list of JSON objects representing all pages in the given data source, with all properties.
-        You can specify the number of entries to be loaded using the `limit` parameter.
-        With API version 2025-09-03, this queries a data source, not a database.
-        """
-        url = f"https://api.notion.com/v1/data_sources/{data_source_id}/query"
-        pages_json = []
-        has_more = True
-        start_cursor = None
-        count = 0
-
-        while has_more:
-            payload = {}
-            if start_cursor:
-                payload["start_cursor"] = start_cursor
+            payload: Dict[str, Any] = {"page_size": page_size}
+            if cursor:
+                payload["start_cursor"] = cursor
             if limit is not None:
-                payload["page_size"] = min(100, limit - count) # Max page size is 100
+                payload["page_size"] = min(page_size, limit - yielded)
 
-            response = self._make_request("POST", url, payload)
-            pages_json.extend([page["properties"] for page in response["results"]])
-            has_more = response.get("has_more", False)
-            start_cursor = response.get("next_cursor", None)
-            count += len(response["results"])
-
-            if limit is not None and count >= limit:
-                pages_json = pages_json[:limit]
+            response = self._make_request(
+                "POST",
+                url,
+                payload,
+                retry_policy=retry_policy,
+                request_timeout=request_timeout,
+            )
+            results = response.get("results", [])
+            if not isinstance(results, list):
                 break
 
+            for page in results:
+                if not isinstance(page, dict):
+                    continue
+                yield page
+                yielded += 1
+                if limit is not None and yielded >= limit:
+                    return
+
+            has_more = bool(response.get("has_more", False))
+            cursor = response.get("next_cursor", None)
+            if has_more and not cursor:
+                break
+
+    def get_data_source_page_ids(
+        self,
+        data_source_id: str,
+        retry_policy: Optional[RetryPolicy] = None,
+        request_timeout: Optional[float] = None,
+    ) -> List[str]:
+        """Returns the IDs of all pages in a given data source."""
+        return [
+            page["id"]
+            for page in self.iter_data_source_pages(
+                data_source_id,
+                retry_policy=retry_policy,
+                request_timeout=request_timeout,
+            )
+            if isinstance(page.get("id"), str)
+        ]
+
+    def get_data_source_pages_as_json(
+        self,
+        data_source_id: str,
+        limit: Optional[int] = None,
+        retry_policy: Optional[RetryPolicy] = None,
+        request_timeout: Optional[float] = None,
+    ) -> List[Dict[str, Any]]:
+        """Returns all page properties for a data source as JSON objects."""
+        pages_json: List[Dict[str, Any]] = []
+        for page in self.iter_data_source_pages(
+            data_source_id,
+            limit=limit,
+            retry_policy=retry_policy,
+            request_timeout=request_timeout,
+        ):
+            properties = page.get("properties", {})
+            if isinstance(properties, dict):
+                pages_json.append(properties)
         return pages_json
 
-    def get_data_source_pages_as_dataframe(self, data_source_id: str, limit: Optional[int] = None, include_page_ids: bool = True) -> pd.DataFrame:
-        """Retrieves all pages from a Notion data source and returns them as a Pandas DataFrame.
+    def _page_properties_to_record(
+        self,
+        page: Dict[str, Any],
+        include_page_ids: bool = True,
+        utc: bool = True,
+    ) -> Dict[str, Any]:
+        """Converts a raw page payload to a flat row record."""
+        properties = page.get("properties", {})
+        if not isinstance(properties, dict):
+            properties = {}
 
-        This method collects pages from the specified Notion data source, optionally including the page IDs,
-        and extracts a predefined set of allowed properties from each page to form a structured DataFrame.
-        Numeric values are formatted to avoid scientific notation.
+        row: Dict[str, Any] = {}
+        if include_page_ids:
+            row["notion_page_id"] = page.get("id", "")
 
-        Parameters:
-            data_source_id (str): The identifier of the Notion data source.
-            limit (int, optional): Maximum number of page entries to include. If None, all pages are retrieved.
-            include_page_ids (bool, optional): If True, includes an additional column 'notion_page_id' in the DataFrame.
-                                               Defaults to True.
-
-        Returns:
-            pandas.DataFrame: A DataFrame where each row represents a page with columns corresponding to page properties.
-                              If include_page_ids is True, an additional column 'notion_page_id' is included.
-        """
-        # Retrieve pages with or without page IDs based on the flag
-        all_pages_data = []
-        has_more = True
-        start_cursor = None
-        count = 0
-
-        url = f"https://api.notion.com/v1/data_sources/{data_source_id}/query"
-
-        while has_more:
-            payload = {}
-            if start_cursor:
-                payload["start_cursor"] = start_cursor
-            if limit is not None:
-                payload["page_size"] = min(100, limit - count) # Max page size is 100
-
-            response = self._make_request("POST", url, payload)
-            for page in response["results"]:
-                props = page["properties"]
-                if include_page_ids:
-                    props["notion_page_id"] = page.get("id", "")
-                all_pages_data.append(props)
-
-            has_more = response.get("has_more", False)
-            start_cursor = response.get("next_cursor", None)
-            count += len(response["results"])
-
-            if limit is not None and count >= limit:
-                all_pages_data = all_pages_data[:limit]
-                break
-
-        data = []
-        # Define the list of allowed property types that we want to extract
-        allowed_properties = [
+        allowed_properties = {
             "title",
             "status",
             "number",
@@ -1466,76 +1646,136 @@ class NotionHelper:
             "last_edited_time",
             "formula",
             "file",
-        ]
-        if include_page_ids:
-            allowed_properties.append("notion_page_id")
+        }
 
-        for page in all_pages_data:
-            row = {}
-            for key, value in page.items():
-                if key == "notion_page_id":
-                    row[key] = value
-                    continue
-                property_type = value.get("type", "")
-                if property_type in allowed_properties:
-                    if property_type == "title":
-                        title_list = value.get("title", [])
-                        row[key] = title_list[0].get("plain_text", "") if title_list else ""
-                    elif property_type == "status":
-                        row[key] = value.get("status", {}).get("name", "")
-                    elif property_type == "number":
-                        number_value = value.get("number", None)
-                        row[key] = float(number_value) if isinstance(number_value, (int, float)) else None
-                    elif property_type == "date":
-                        date_field = value.get("date", {})
-                        row[key] = date_field.get("start", "") if date_field else ""
-                    elif property_type == "url":
-                        row[key] = value.get("url", "")
-                    elif property_type == "checkbox":
-                        row[key] = value.get("checkbox", False)
-                    elif property_type == "rich_text":
-                        rich_text_field = value.get("rich_text", [])
-                        row[key] = rich_text_field[0].get("plain_text", "") if rich_text_field else ""
-                    elif property_type == "email":
-                        row[key] = value.get("email", "")
-                    elif property_type == "select":
-                        select_field = value.get("select", {})
-                        row[key] = select_field.get("name", "") if select_field else ""
-                    elif property_type == "people":
-                        people_list = value.get("people", [])
-                        if people_list:
-                            person = people_list[0]
-                            row[key] = {"name": person.get("name", ""), "email": person.get("person", {}).get("email", "")}
-                    elif property_type == "phone_number":
-                        row[key] = value.get("phone_number", "")
-                    elif property_type == "multi_select":
-                        multi_select_field = value.get("multi_select", [])
-                        row[key] = [item.get("name", "") for item in multi_select_field]
-                    elif property_type == "created_time":
-                        row[key] = value.get("created_time", "")
-                    elif property_type == "created_by":
-                        created_by = value.get("created_by", {})
-                        row[key] = created_by.get("name", "")
-                    elif property_type == "rollup":
-                        rollup_field = value.get("rollup", {}).get("array", [])
-                        row[key] = [item.get("date", {}).get("start", "") for item in rollup_field]
-                    elif property_type == "relation":
-                        relation_list = value.get("relation", [])
-                        row[key] = [relation.get("id", "") for relation in relation_list]
-                    elif property_type == "last_edited_by":
-                        last_edited_by = value.get("last_edited_by", {})
-                        row[key] = last_edited_by.get("name", "")
-                    elif property_type == "last_edited_time":
-                        row[key] = value.get("last_edited_time", "")
-                    elif property_type == "formula":
-                        formula_value = value.get("formula", {})
-                        row[key] = formula_value.get(formula_value.get("type", ""), "")
-                    elif property_type == "file":
-                        files = value.get("files", [])
-                        row[key] = [file.get("name", "") for file in files]
-            data.append(row)
+        for key, value in properties.items():
+            if not isinstance(value, dict):
+                continue
+            property_type = value.get("type", "")
+            if property_type not in allowed_properties:
+                continue
+            if property_type == "title":
+                title_list = value.get("title", [])
+                row[key] = title_list[0].get("plain_text", "") if title_list else ""
+            elif property_type == "status":
+                row[key] = value.get("status", {}).get("name", "")
+            elif property_type == "number":
+                number_value = value.get("number", None)
+                row[key] = float(number_value) if isinstance(number_value, (int, float)) else None
+            elif property_type == "date":
+                date_field = self.normalize_notion_date(value.get("date", {}), utc=utc)
+                row[key] = date_field.get("start", "") if date_field else ""
+            elif property_type == "url":
+                row[key] = value.get("url", "")
+            elif property_type == "checkbox":
+                row[key] = value.get("checkbox", False)
+            elif property_type == "rich_text":
+                rich_text_field = value.get("rich_text", [])
+                row[key] = rich_text_field[0].get("plain_text", "") if rich_text_field else ""
+            elif property_type == "email":
+                row[key] = value.get("email", "")
+            elif property_type == "select":
+                select_field = value.get("select", {})
+                row[key] = select_field.get("name", "") if select_field else ""
+            elif property_type == "people":
+                people_list = value.get("people", [])
+                if people_list:
+                    person = people_list[0]
+                    row[key] = {"name": person.get("name", ""), "email": person.get("person", {}).get("email", "")}
+            elif property_type == "phone_number":
+                row[key] = value.get("phone_number", "")
+            elif property_type == "multi_select":
+                multi_select_field = value.get("multi_select", [])
+                row[key] = [item.get("name", "") for item in multi_select_field]
+            elif property_type == "created_time":
+                row[key] = self.normalize_datetime_iso(value.get("created_time", ""), utc=utc)
+            elif property_type == "created_by":
+                created_by = value.get("created_by", {})
+                row[key] = created_by.get("name", "")
+            elif property_type == "rollup":
+                rollup_field = value.get("rollup", {}).get("array", [])
+                row[key] = [
+                    self.normalize_notion_date(item.get("date", {}), utc=utc).get("start", "")
+                    for item in rollup_field
+                ]
+            elif property_type == "relation":
+                relation_list = value.get("relation", [])
+                row[key] = [relation.get("id", "") for relation in relation_list]
+            elif property_type == "last_edited_by":
+                last_edited_by = value.get("last_edited_by", {})
+                row[key] = last_edited_by.get("name", "")
+            elif property_type == "last_edited_time":
+                row[key] = self.normalize_datetime_iso(value.get("last_edited_time", ""), utc=utc)
+            elif property_type == "formula":
+                formula_value = value.get("formula", {})
+                row[key] = formula_value.get(formula_value.get("type", ""), "")
+            elif property_type == "file":
+                files = value.get("files", [])
+                row[key] = [file.get("name", "") for file in files]
+        return row
 
-        df = pd.DataFrame(data)
+    def iter_data_source_page_records(
+        self,
+        data_source_id: str,
+        limit: Optional[int] = None,
+        include_page_ids: bool = True,
+        utc: bool = True,
+        page_size: int = 100,
+        start_cursor: Optional[str] = None,
+        retry_policy: Optional[RetryPolicy] = None,
+        request_timeout: Optional[float] = None,
+    ) -> Iterator[Dict[str, Any]]:
+        """Yields flattened row records from a data source before dataframe conversion."""
+        for page in self.iter_data_source_pages(
+            data_source_id=data_source_id,
+            limit=limit,
+            page_size=page_size,
+            start_cursor=start_cursor,
+            retry_policy=retry_policy,
+            request_timeout=request_timeout,
+        ):
+            yield self._page_properties_to_record(page, include_page_ids=include_page_ids, utc=utc)
+
+    def get_data_source_pages_as_dataframe(
+        self,
+        data_source_id: str,
+        limit: Optional[int] = None,
+        include_page_ids: bool = True,
+        utc: bool = True,
+        retry_policy: Optional[RetryPolicy] = None,
+        request_timeout: Optional[float] = None,
+    ) -> pd.DataFrame:
+        """Retrieves all pages from a Notion data source and returns them as a Pandas DataFrame.
+
+        This method collects pages from the specified Notion data source, optionally including the page IDs,
+        and extracts a predefined set of allowed properties from each page to form a structured DataFrame.
+        Numeric values are formatted to avoid scientific notation.
+
+        Parameters:
+            data_source_id (str): The identifier of the Notion data source.
+            limit (int, optional): Maximum number of page entries to include. If None, all pages are retrieved.
+            include_page_ids (bool, optional): If True, includes an additional column 'notion_page_id' in the DataFrame.
+                                               Defaults to True.
+            utc (bool, optional): If True, normalize datetime values to UTC ISO 8601.
+                                  Defaults to True.
+            retry_policy (RetryPolicy, optional): Per-call retry policy override.
+            request_timeout (float, optional): Per-call timeout override.
+
+        Returns:
+            pandas.DataFrame: A DataFrame where each row represents a page with columns corresponding to page properties.
+                              If include_page_ids is True, an additional column 'notion_page_id' is included.
+        """
+        records = list(
+            self.iter_data_source_page_records(
+                data_source_id=data_source_id,
+                limit=limit,
+                include_page_ids=include_page_ids,
+                utc=utc,
+                retry_policy=retry_policy,
+                request_timeout=request_timeout,
+            )
+        )
+        df = pd.DataFrame(records)
         pd.options.display.float_format = "{:.3f}".format
         return df
 

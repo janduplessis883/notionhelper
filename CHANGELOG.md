@@ -2,6 +2,23 @@
 
 All notable changes to this project are documented in this file.
 
+## [0.6.0] - 2026-02-28
+
+### Added
+- `ConverterAdapter` interface plus adapter implementations: `NotionBlockifyAdapter` (default) and `InternalConverterAdapter` (fallback).
+- `NotionHelper.set_converter_adapter(...)` for swapping conversion engines without changing call sites.
+- Unit tests for adapter selection and fallback behavior.
+- Datetime utilities: `parse_datetime_utc`, `normalize_datetime_iso`, and `normalize_notion_date` for timezone-safe parsing/normalization.
+- Structured exceptions for API failures: `AuthError`, `RateLimitError`, `NotFoundError`, `ValidationError`, and `TimeoutError`.
+- Streaming pagination helpers: `iter_data_source_pages(...)` and `iter_data_source_page_records(...)`.
+
+### Changed
+- Markdown-to-block conversion now routes through the adapter abstraction instead of calling `notion_blockify` directly.
+- `get_page(..., return_markdown=True)` now converts blocks to markdown through the configured adapter.
+- `get_page` now treats `return_markdown` as canonical and accepts deprecated aliases (`returnmarkdown`, `markdownformat`) with migration warnings.
+- `get_data_source_pages_as_dataframe(..., utc=True)` now normalizes datetime-like Notion fields to consistent ISO 8601 UTC output by default.
+- Request retries now use configurable policy objects with jitter and per-call override support.
+
 ## [0.5.4] - 2026-02-26
 
 ### Added
