@@ -2,7 +2,7 @@
 
 ![NotionHelper](https://github.com/janduplessis883/notionhelper/raw/master/images/notionh4.png?raw=true)
 
-`NotionHelper` is a Python library that provides a convenient interface for interacting with the Notion API, specifically designed to leverage the **Notion API Version 2025-09-03**. It simplifies common tasks such as managing databases, data sources, pages, and file uploads, allowing you to integrate Notion's powerful features into your applications with ease.
+`NotionHelper` is a Python library that provides a convenient interface for interacting with the Notion API, specifically designed to leverage the **Notion API Version 2025-09-03** for core objects while also supporting Notion's native **2026-03-11 markdown endpoints**. It simplifies common tasks such as managing databases, data sources, pages, markdown content, and file uploads, allowing you to integrate Notion's powerful features into your applications with ease.
 
 For help constructing the JSON for the properties, use the [Notion API - JSON Builder](https://notioinapiassistant.streamlit.app) Streamlit app.
 
@@ -12,10 +12,11 @@ For help constructing the JSON for the properties, use the [Notion API - JSON Bu
 -   **Type Safety**: Full type hints for all methods ensuring better development experience and IDE support.
 -   **Error Handling**: Robust error handling for API calls and file operations.
 -   **Database & Data Source Management**: Create, retrieve, query, and update Notion databases and their associated data sources.
--   **Page Operations**: Add new pages to data sources and append content to existing pages.
+-   **Page Operations**: Add new pages to data sources, append content to existing pages, and work with Notion's native markdown endpoints.
 -   **File Handling**: Upload files and attach them to pages or page properties with built-in validation.
 -   **Pandas Integration**: Convert Notion data source pages into a Pandas DataFrame for easy data manipulation.
 -   **API Version 2025-09-03 Compliance**: Fully updated to support the latest Notion API changes, including the separation of databases and data sources.
+-   **Native Markdown Endpoints**: Create, read, and update page content through `/v1/pages/{id}/markdown` and markdown-backed page creation.
 
 ## Installation
 
@@ -111,6 +112,21 @@ new_page = helper.new_page_to_data_source(data_source_id, page_properties)
 print(new_page)
 ```
 
+You can also create the page body with Notion's native markdown API:
+
+```python
+new_page = helper.new_page_to_data_source(
+    data_source_id,
+    page_properties={
+        "Task Name": {
+            "title": [{"text": {"content": "Markdown-backed task"}}]
+        }
+    },
+    markdown="# Task Notes\n\n- [ ] Draft proposal\n- [ ] Schedule follow-up",
+)
+print(new_page["id"])
+```
+
 ### Append Content to the New Page
 
 ```python
@@ -153,7 +169,7 @@ helper.append_page_body(page_id, markdown_body)
 
 ### Retrieve a Page and Convert to Markdown
 
-NotionHelper can retrieve page content and optionally convert it to markdown format for easy use in documents, blogs, or other applications.
+NotionHelper can retrieve page content and optionally return markdown format for easy use in documents, blogs, or other applications.
 
 #### Get Page as JSON (Default)
 
@@ -170,12 +186,23 @@ content = result["content"]        # List of block objects (JSON)
 page_id = "your_page_id"
 result = helper.get_page(page_id, return_markdown=True)
 properties = result["properties"]  # Page properties
-markdown_content = result["content"]  # String in markdown format
+markdown_content = result["content"]  # String from Notion's native markdown endpoint
 print(markdown_content)
 ```
 
 Use `return_markdown` as the canonical parameter name. Deprecated aliases
 `returnmarkdown` and `markdownformat` are still accepted with warnings.
+
+By default, `get_page(..., return_markdown=True)` uses Notion's native markdown API (`/v1/pages/{page_id}/markdown`). To force the legacy block-to-markdown conversion path, pass `use_markdown_api=False`.
+
+You can also call the native endpoint directly to access Notion's markdown metadata:
+
+```python
+markdown_result = helper.get_page_markdown(page_id, include_transcript=True)
+print(markdown_result["markdown"])
+print(markdown_result["truncated"])
+print(markdown_result["unknown_block_ids"])
+```
 
 The markdown conversion supports:
 - **Headings** (H1, H2, H3)
@@ -191,6 +218,35 @@ This is useful for:
 - Creating blog posts from Notion content
 - Storing content in version control
 - Converting documentation to other formats
+
+### Update Page Content with Native Markdown Commands
+
+Use `update_page_markdown(...)` to access Notion's native markdown update API:
+
+```python
+helper.update_page_markdown(
+    page_id,
+    "update_content",
+    content_updates=[
+        {
+            "old_str": "Draft proposal",
+            "new_str": "Draft proposal (due Friday)",
+        }
+    ],
+)
+
+helper.update_page_markdown(
+    page_id,
+    "replace_content",
+    new_str="# Fresh Start\n\nThis replaces all previous content.",
+)
+```
+
+Supported commands:
+- `update_content`
+- `replace_content`
+- `insert_content`
+- `replace_content_range`
 
 ### Get all pages from a Data Source as a Pandas DataFrame
 
@@ -538,11 +594,13 @@ The `NotionHelper` class provides the following methods:
 - **`notion_search_db(query="", filter_object_type="page")`** - Searches for pages or data sources in Notion.
 
 ### Page Operations
-- **`new_page_to_data_source(data_source_id, page_properties)`** - Adds a new page to a Notion data source with the specified properties.
+- **`new_page_to_data_source(data_source_id, page_properties=None, markdown=None)`** - Adds a new page to a Notion data source, optionally using Notion's native markdown page creation.
 - **`trash_page(page_id)`** - Moves a page to Notion trash.
 - **`restore_page(page_id)`** - Restores a page from Notion trash.
 - **`append_page_body(page_id, body=None, sanitize=True, blocks=None, batch_size=100)`** - Appends either Notion blocks (`list[dict]`) or raw Markdown (`str`) to a Notion page body with optional sanitization and automatic batching.
-- **`get_page(page_id, return_markdown=False)`** - Retrieves page properties and page content; use `return_markdown=True` for markdown output. Deprecated aliases `returnmarkdown` and `markdownformat` remain temporarily supported with warnings.
+- **`get_page(page_id, return_markdown=False, use_markdown_api=None, include_transcript=False)`** - Retrieves page properties and page content; `return_markdown=True` uses Notion's native markdown endpoint by default.
+- **`get_page_markdown(page_id, include_transcript=False)`** - Retrieves the raw response from Notion's native markdown endpoint, including truncation metadata.
+- **`update_page_markdown(page_id, command, ...)`** - Updates page content through Notion's markdown update API.
 - **`extract_page_id_from_url(page_url_or_id, with_hyphens=True)`** - Extracts and normalizes a Notion page ID from either a Notion URL or raw ID.
 
 ### Data Retrieval & Conversion

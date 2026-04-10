@@ -97,12 +97,104 @@ def test_get_page_accepts_deprecated_markdownformat_alias_with_warning():
     assert isinstance(result["content"], str)
 
 
+def test_get_page_return_markdown_prefers_native_markdown_endpoint():
+    helper = NotionHelper("token")
+
+    with patch.object(NotionHelper, "_make_request") as mock_request:
+        mock_request.side_effect = [
+            {"properties": {"Name": {"title": []}}},
+            {
+                "object": "page_markdown",
+                "markdown": "# Title\n\nBody",
+                "truncated": False,
+                "unknown_block_ids": [],
+            },
+        ]
+        result = helper.get_page("page-id", return_markdown=True)
+
+    assert result["properties"] == {"Name": {"title": []}}
+    assert result["content"] == "# Title\n\nBody"
+    assert mock_request.call_count == 2
+    assert mock_request.call_args_list[1].args[1].endswith("/v1/pages/page-id/markdown")
+    assert mock_request.call_args_list[1].kwargs["api_version"] == "2026-03-11"
+
+
+def test_get_page_return_markdown_can_fallback_to_legacy_block_conversion():
+    helper = NotionHelper("token")
+
+    with patch.object(NotionHelper, "_make_request") as mock_request:
+        mock_request.side_effect = [
+            {"properties": {"Name": {"title": []}}},
+            {"results": [], "has_more": False, "next_cursor": None},
+        ]
+        result = helper.get_page("page-id", return_markdown=True, use_markdown_api=False)
+
+    assert isinstance(result["content"], str)
+    assert mock_request.call_count == 2
+    assert mock_request.call_args_list[1].args[1].endswith("/v1/blocks/page-id/children")
+
+
 def test_get_page_raises_on_conflicting_canonical_and_alias_values():
     helper = NotionHelper("token")
 
     with pytest.warns(FutureWarning, match="return_markdown"):
         with pytest.raises(ValueError, match="Conflicting values"):
             helper.get_page("page-id", return_markdown=True, markdownformat=False)
+
+
+def test_get_page_markdown_passes_include_transcript_to_native_endpoint():
+    helper = NotionHelper("token")
+
+    with patch.object(NotionHelper, "_make_request", return_value={"markdown": ""}) as mock_request:
+        helper.get_page_markdown("page-id", include_transcript=True)
+
+    assert mock_request.call_args.args[1].endswith("/v1/pages/page-id/markdown")
+    assert mock_request.call_args.kwargs["params"] == {"include_transcript": True}
+    assert mock_request.call_args.kwargs["api_version"] == "2026-03-11"
+
+
+def test_new_page_to_data_source_supports_native_markdown_creation():
+    helper = NotionHelper("token")
+
+    with patch.object(NotionHelper, "_make_request", return_value={"id": "page-id"}) as mock_request:
+        helper.new_page_to_data_source(
+            "data-source-id",
+            {"Name": {"title": [{"text": {"content": "Hello"}}]}},
+            markdown="# Hello\n\nBody",
+        )
+
+    payload = mock_request.call_args.args[2]
+    assert payload["parent"] == {"data_source_id": "data-source-id"}
+    assert payload["markdown"] == "# Hello\n\nBody"
+    assert payload["properties"]["Name"]["title"][0]["text"]["content"] == "Hello"
+    assert mock_request.call_args.kwargs["api_version"] == "2026-03-11"
+
+
+def test_update_page_markdown_builds_update_content_payload():
+    helper = NotionHelper("token")
+
+    with patch.object(NotionHelper, "_make_request", return_value={"markdown": "updated"}) as mock_request:
+        helper.update_page_markdown(
+            "page-id",
+            "update_content",
+            content_updates=[
+                {"old_str": "Draft proposal", "new_str": "Draft proposal (due Friday)"}
+            ],
+            allow_deleting_content=True,
+        )
+
+    payload = mock_request.call_args.args[2]
+    assert payload["type"] == "update_content"
+    assert payload["update_content"]["content_updates"][0]["old_str"] == "Draft proposal"
+    assert payload["update_content"]["allow_deleting_content"] is True
+    assert mock_request.call_args.kwargs["api_version"] == "2026-03-11"
+
+
+def test_update_page_markdown_requires_matching_command_fields():
+    helper = NotionHelper("token")
+
+    with pytest.raises(ValueError, match="new_str is required"):
+        helper.update_page_markdown("page-id", "replace_content")
 
 
 def test_make_request_retries_on_429_with_retry_after():

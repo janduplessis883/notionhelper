@@ -2,6 +2,16 @@
 
 All notable changes to this project are documented in this file.
 
+## [0.6.1] - 2026-04-11
+
+### Added
+- `get_page_markdown(page_id, include_transcript=False)` for Notion's native `/v1/pages/{page_id}/markdown` endpoint.
+- `update_page_markdown(page_id, command, ...)` for native markdown page updates (`update_content`, `replace_content`, `insert_content`, `replace_content_range`).
+- `new_page_to_data_source(..., markdown=...)` support for creating pages with Notion's native markdown body.
+
+### Changed
+- `get_page(..., return_markdown=True)` now uses Notion's native markdown endpoint by default, with `use_markdown_api=False` available for the legacy block-conversion path.
+
 ## [0.6.0] - 2026-02-28
 
 ### Added

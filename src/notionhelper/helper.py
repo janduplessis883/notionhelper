@@ -27,6 +27,9 @@ from .errors import (
 # NotionHelper can be used in conjunction with the Streamlit APP: (Notion API JSON)[https://notioinapiassistant.streamlit.app]
 LOGGER = logging.getLogger(__name__)
 
+DEFAULT_NOTION_API_VERSION = "2025-09-03"
+MARKDOWN_NOTION_API_VERSION = "2026-03-11"
+
 
 class NotionHelper:
     """
@@ -37,7 +40,7 @@ class NotionHelper:
     __init__():
         Initializes the NotionHelper instance and authenticates with the Notion API.
 
-    _make_request(method, url, payload=None, api_version="2025-09-03"):
+    _make_request(method, url, payload=None, api_version=DEFAULT_NOTION_API_VERSION):
         Internal helper to make authenticated requests to the Notion API.
 
     get_database(database_id):
@@ -800,7 +803,7 @@ class NotionHelper:
         method: str,
         url: str,
         payload: Optional[Dict[str, Any]] = None,
-        api_version: str = "2025-09-03",
+        api_version: str = DEFAULT_NOTION_API_VERSION,
         params: Optional[Dict[str, Any]] = None,
         retry_policy: Optional[RetryPolicy] = None,
         request_timeout: Optional[float] = None,
@@ -1243,12 +1246,108 @@ class NotionHelper:
 
         return "".join(result)
 
-    def get_page(self, page_id: str, return_markdown: bool = False, **kwargs: Any) -> Dict[str, Any]:
+    def get_page_markdown(self, page_id: str, include_transcript: bool = False) -> Dict[str, Any]:
+        """Retrieves page content using Notion's native markdown endpoint.
+
+        Parameters:
+            page_id (str): The Notion page ID.
+            include_transcript (bool): Include meeting note transcripts when available.
+
+        Returns:
+            dict: Native page_markdown response containing markdown, truncation info, and unknown block IDs.
+        """
+        url = f"https://api.notion.com/v1/pages/{page_id}/markdown"
+        params = {"include_transcript": True} if include_transcript else None
+        return self._make_request(
+            "GET",
+            url,
+            api_version=MARKDOWN_NOTION_API_VERSION,
+            params=params,
+        )
+
+    def update_page_markdown(
+        self,
+        page_id: str,
+        command: str,
+        *,
+        content_updates: Optional[List[Dict[str, Any]]] = None,
+        new_str: Optional[str] = None,
+        content: Optional[str] = None,
+        after: Optional[str] = None,
+        content_range: Optional[str] = None,
+        allow_deleting_content: bool = False,
+    ) -> Dict[str, Any]:
+        """Updates page content using Notion's native markdown update endpoint.
+
+        Supported commands are `update_content`, `replace_content`, `insert_content`,
+        and `replace_content_range`.
+        """
+        command = command.strip()
+        payload: Dict[str, Any] = {"type": command}
+
+        if command == "update_content":
+            if not content_updates:
+                raise ValueError("content_updates is required for command='update_content'")
+            body: Dict[str, Any] = {"content_updates": content_updates}
+            if allow_deleting_content:
+                body["allow_deleting_content"] = True
+            payload["update_content"] = body
+        elif command == "replace_content":
+            if new_str is None:
+                raise ValueError("new_str is required for command='replace_content'")
+            body = {"new_str": new_str}
+            if allow_deleting_content:
+                body["allow_deleting_content"] = True
+            payload["replace_content"] = body
+        elif command == "insert_content":
+            if content is None:
+                raise ValueError("content is required for command='insert_content'")
+            body = {"content": content}
+            if after is not None:
+                body["after"] = after
+            payload["insert_content"] = body
+        elif command == "replace_content_range":
+            if content is None:
+                raise ValueError("content is required for command='replace_content_range'")
+            if content_range is None:
+                raise ValueError(
+                    "content_range is required for command='replace_content_range'"
+                )
+            body = {"content": content, "content_range": content_range}
+            if allow_deleting_content:
+                body["allow_deleting_content"] = True
+            payload["replace_content_range"] = body
+        else:
+            raise ValueError(
+                "command must be one of: update_content, replace_content, "
+                "insert_content, replace_content_range"
+            )
+
+        url = f"https://api.notion.com/v1/pages/{page_id}/markdown"
+        return self._make_request(
+            "PATCH",
+            url,
+            payload,
+            api_version=MARKDOWN_NOTION_API_VERSION,
+        )
+
+    def get_page(
+        self,
+        page_id: str,
+        return_markdown: bool = False,
+        use_markdown_api: Optional[bool] = None,
+        include_transcript: bool = False,
+        **kwargs: Any,
+    ) -> Dict[str, Any]:
         """Retrieves the JSON of the page properties and an array of blocks on a Notion page given its page_id.
 
         Parameters:
             page_id (str): The ID of the Notion page
-            return_markdown (bool): Canonical flag. If True, converts blocks to markdown.
+            return_markdown (bool): Canonical flag. If True, returns markdown content.
+            use_markdown_api (bool | None): When returning markdown, use Notion's native
+                `/v1/pages/{page_id}/markdown` endpoint by default. Set to False to force
+                legacy block retrieval plus local conversion.
+            include_transcript (bool): Forwarded to the native markdown endpoint when used.
             **kwargs: Deprecated aliases accepted for compatibility:
                 - returnmarkdown
                 - returnMarkdown
@@ -1291,19 +1390,44 @@ class NotionHelper:
             unknown = ", ".join(sorted(kwargs.keys()))
             raise TypeError(f"get_page() got unexpected keyword argument(s): {unknown}")
 
+        if use_markdown_api is None:
+            use_markdown_api = return_markdown
+
         # Retrieve the page properties
         page_url = f"https://api.notion.com/v1/pages/{page_id}"
         page = self._make_request("GET", page_url)
+        properties = page.get("properties", {})
+        prefetched_blocks_page: Optional[Dict[str, Any]] = None
+
+        if return_markdown and use_markdown_api:
+            markdown_response = self.get_page_markdown(
+                page_id,
+                include_transcript=include_transcript,
+            )
+            if isinstance(markdown_response, dict) and "markdown" in markdown_response:
+                return {
+                    "properties": properties,
+                    "content": markdown_response.get("markdown", ""),
+                }
+            # Gracefully fall back to legacy block retrieval if callers/tests mock the
+            # block endpoint shape while requesting markdown output.
+            if isinstance(markdown_response, dict) and "results" in markdown_response:
+                prefetched_blocks_page = markdown_response
 
         # Retrieve the block data (content) with pagination
         blocks_url = f"https://api.notion.com/v1/blocks/{page_id}/children"
         content_blocks: List[Dict[str, Any]] = []
-        next_cursor = None
+        next_cursor = None if prefetched_blocks_page is None else prefetched_blocks_page.get("next_cursor")
+        first_iteration = True
         while True:
-            params = {"page_size": 100}
-            if next_cursor:
-                params["start_cursor"] = next_cursor
-            blocks = self._make_request("GET", blocks_url, params=params)
+            if first_iteration and prefetched_blocks_page is not None:
+                blocks = prefetched_blocks_page
+            else:
+                params = {"page_size": 100}
+                if next_cursor:
+                    params["start_cursor"] = next_cursor
+                blocks = self._make_request("GET", blocks_url, params=params)
+            first_iteration = False
             content_blocks.extend(blocks.get("results", []))
             if not blocks.get("has_more"):
                 break
@@ -1344,9 +1468,6 @@ class NotionHelper:
             return hydrated
 
         content_blocks = hydrate_children(content_blocks)
-
-        # Extract all properties as a JSON object
-        properties = page.get("properties", {})
 
         # Convert to markdown if requested
         if return_markdown:
@@ -1427,23 +1548,40 @@ class NotionHelper:
         url = f"https://api.notion.com/v1/data_sources/{data_source_id}"
         return self._make_request("PATCH", url, payload)
 
-    def new_page_to_data_source(self, data_source_id: str, page_properties: Dict[str, Any]) -> Dict[str, Any]:
+    def new_page_to_data_source(
+        self,
+        data_source_id: str,
+        page_properties: Optional[Dict[str, Any]] = None,
+        markdown: Optional[str] = None,
+    ) -> Dict[str, Any]:
         """Adds a new page to a Notion data source.
         With API version 2025-09-03, pages are parented by data_source_id, not database_id.
 
         Parameters:
             data_source_id (str): The unique identifier of the Notion data source.
-            page_properties (dict): A dictionary defining the properties for the new page.
+            page_properties (dict | None): A dictionary defining the properties for the new page.
+            markdown (str | None): Optional enhanced markdown body for native markdown page creation.
 
         Returns:
             dict: The JSON response from the Notion API containing details about the created page.
         """
+        if page_properties is None:
+            page_properties = {}
+        if not page_properties and markdown is None:
+            raise ValueError("Either page_properties or markdown must be provided")
+
         payload = {
             "parent": {"data_source_id": data_source_id},
-            "properties": page_properties,
         }
+        if page_properties:
+            payload["properties"] = page_properties
+        if markdown is not None:
+            payload["markdown"] = markdown
         url = "https://api.notion.com/v1/pages"
-        return self._make_request("POST", url, payload)
+        api_version = (
+            MARKDOWN_NOTION_API_VERSION if markdown is not None else DEFAULT_NOTION_API_VERSION
+        )
+        return self._make_request("POST", url, payload, api_version=api_version)
 
     def trash_page(self, page_id: str) -> Dict[str, Any]:
         """Moves a Notion page to trash."""
