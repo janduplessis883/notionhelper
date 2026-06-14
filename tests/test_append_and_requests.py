@@ -109,12 +109,13 @@ def test_get_page_return_markdown_prefers_native_markdown_endpoint():
                 "truncated": False,
                 "unknown_block_ids": [],
             },
+            {"results": [], "has_more": False, "next_cursor": None},
         ]
         result = helper.get_page("page-id", return_markdown=True)
 
     assert result["properties"] == {"Name": {"title": []}}
     assert result["content"] == "# Title\n\nBody"
-    assert mock_request.call_count == 2
+    assert mock_request.call_count == 3
     assert mock_request.call_args_list[1].args[1].endswith("/v1/pages/page-id/markdown")
     assert mock_request.call_args_list[1].kwargs["api_version"] == "2026-03-11"
 
@@ -132,6 +133,86 @@ def test_get_page_return_markdown_can_fallback_to_legacy_block_conversion():
     assert isinstance(result["content"], str)
     assert mock_request.call_count == 2
     assert mock_request.call_args_list[1].args[1].endswith("/v1/blocks/page-id/children")
+
+
+def test_get_page_expands_child_page_blocks_in_json_content():
+    helper = NotionHelper("token")
+
+    with patch.object(NotionHelper, "_make_request") as mock_request:
+        mock_request.side_effect = [
+            {"properties": {"Name": {"title": []}}},
+            {
+                "results": [
+                    {
+                        "id": "child-page-id",
+                        "type": "child_page",
+                        "child_page": {"title": "Meeting Minutes"},
+                    }
+                ],
+                "has_more": False,
+                "next_cursor": None,
+            },
+            {"properties": {"Name": {"title": [{"plain_text": "Meeting Minutes"}]}}},
+            {
+                "results": [
+                    {
+                        "id": "child-block-id",
+                        "type": "paragraph",
+                        "paragraph": {
+                            "rich_text": [
+                                {"type": "text", "text": {"content": "Child body"}}
+                            ]
+                        },
+                    }
+                ],
+                "has_more": False,
+                "next_cursor": None,
+            },
+        ]
+        result = helper.get_page("page-id")
+
+    assert mock_request.call_count == 4
+    child_page_block = result["content"][0]
+    child_page_result = child_page_block["child_page"]["page"]
+
+    assert child_page_result["properties"]["Name"]["title"][0]["plain_text"] == "Meeting Minutes"
+    assert child_page_result["content"][0]["paragraph"]["rich_text"][0]["text"]["content"] == "Child body"
+    assert result["child_pages"][0]["id"] == "child-page-id"
+
+
+def test_get_page_return_markdown_includes_expanded_child_pages():
+    helper = NotionHelper("token")
+
+    with patch.object(NotionHelper, "_make_request") as mock_request:
+        mock_request.side_effect = [
+            {"properties": {"Name": {"title": []}}},
+            {
+                "object": "page_markdown",
+                "markdown": "<page url=\"https://app.notion.com/p/childpage\">Meeting Minutes</page>",
+            },
+            {
+                "results": [
+                    {
+                        "id": "child-page-id",
+                        "type": "child_page",
+                        "child_page": {"title": "Meeting Minutes"},
+                    }
+                ],
+                "has_more": False,
+                "next_cursor": None,
+            },
+            {"properties": {"Name": {"title": [{"plain_text": "Meeting Minutes"}]}}},
+            {
+                "object": "page_markdown",
+                "markdown": "# Meeting Minutes\n\nChild body",
+            },
+            {"results": [], "has_more": False, "next_cursor": None},
+        ]
+        result = helper.get_page("page-id", return_markdown=True)
+
+    assert result["content"] == "<page url=\"https://app.notion.com/p/childpage\">Meeting Minutes</page>"
+    assert result["child_pages"][0]["title"] == "Meeting Minutes"
+    assert result["child_pages"][0]["page"]["content"] == "# Meeting Minutes\n\nChild body"
 
 
 def test_get_page_raises_on_conflicting_canonical_and_alias_values():

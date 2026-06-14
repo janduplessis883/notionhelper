@@ -1331,12 +1331,141 @@ class NotionHelper:
             api_version=MARKDOWN_NOTION_API_VERSION,
         )
 
+    def _get_page_blocks(
+        self,
+        page_id: str,
+        prefetched_blocks_page: Optional[Dict[str, Any]] = None,
+    ) -> List[Dict[str, Any]]:
+        """Retrieves all child blocks for a page/block and hydrates nested children."""
+        blocks_url = f"https://api.notion.com/v1/blocks/{page_id}/children"
+        content_blocks: List[Dict[str, Any]] = []
+        next_cursor = None if prefetched_blocks_page is None else prefetched_blocks_page.get("next_cursor")
+        first_iteration = True
+        while True:
+            if first_iteration and prefetched_blocks_page is not None:
+                blocks = prefetched_blocks_page
+            else:
+                params = {"page_size": 100}
+                if next_cursor:
+                    params["start_cursor"] = next_cursor
+                blocks = self._make_request("GET", blocks_url, params=params)
+            first_iteration = False
+            content_blocks.extend(blocks.get("results", []))
+            if not blocks.get("has_more"):
+                break
+            next_cursor = blocks.get("next_cursor")
+            if not next_cursor:
+                break
+
+        return self._hydrate_block_children(content_blocks)
+
+    def _hydrate_block_children(self, blocks: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+        """Hydrates nested block children for blocks that support block children."""
+        hydrated: List[Dict[str, Any]] = []
+        for block in blocks:
+            if not isinstance(block, dict):
+                continue
+            if block.get("has_children") and block.get("id"):
+                block_id = block["id"]
+                children = self._get_page_blocks(block_id)
+                block_type = block.get("type")
+                if isinstance(block_type, str):
+                    block_payload = block.get(block_type, {})
+                    if isinstance(block_payload, dict):
+                        block_payload["children"] = children
+                        block[block_type] = block_payload
+            hydrated.append(block)
+        return hydrated
+
+    def _expand_child_pages(
+        self,
+        blocks: List[Dict[str, Any]],
+        *,
+        return_markdown: bool,
+        use_markdown_api: Optional[bool],
+        include_transcript: bool,
+        max_child_page_depth: int,
+        child_page_depth: int,
+        visited_page_ids: set[str],
+    ) -> List[Dict[str, Any]]:
+        """Fetches child_page blocks with get_page and embeds their page payload."""
+        expanded: List[Dict[str, Any]] = []
+        for block in blocks:
+            if not isinstance(block, dict):
+                continue
+
+            block_type = block.get("type")
+            if block_type == "child_page":
+                child_page_id = block.get("id")
+                child_payload = block.get("child_page", {})
+                if (
+                    isinstance(child_page_id, str)
+                    and child_page_depth < max_child_page_depth
+                    and child_page_id not in visited_page_ids
+                ):
+                    child_payload = child_payload if isinstance(child_payload, dict) else {}
+                    child_payload["page"] = self.get_page(
+                        child_page_id,
+                        return_markdown=return_markdown,
+                        use_markdown_api=use_markdown_api,
+                        include_transcript=include_transcript,
+                        expand_child_pages=True,
+                        max_child_page_depth=max_child_page_depth,
+                        _child_page_depth=child_page_depth + 1,
+                        _visited_page_ids=visited_page_ids | {child_page_id},
+                    )
+                    block["child_page"] = child_payload
+
+            block_payload = block.get(block_type, {}) if isinstance(block_type, str) else {}
+            if isinstance(block_payload, dict) and isinstance(block_payload.get("children"), list):
+                block_payload["children"] = self._expand_child_pages(
+                    block_payload["children"],
+                    return_markdown=return_markdown,
+                    use_markdown_api=use_markdown_api,
+                    include_transcript=include_transcript,
+                    max_child_page_depth=max_child_page_depth,
+                    child_page_depth=child_page_depth,
+                    visited_page_ids=visited_page_ids,
+                )
+                block[block_type] = block_payload
+
+            expanded.append(block)
+        return expanded
+
+    def _collect_expanded_child_pages(self, blocks: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+        """Collects child page payloads embedded by _expand_child_pages."""
+        child_pages: List[Dict[str, Any]] = []
+
+        def walk(items: List[Dict[str, Any]]) -> None:
+            for item in items:
+                if not isinstance(item, dict):
+                    continue
+                block_type = item.get("type")
+                block_payload = item.get(block_type, {}) if isinstance(block_type, str) else {}
+                if block_type == "child_page" and isinstance(block_payload, dict):
+                    page_payload = block_payload.get("page")
+                    if isinstance(page_payload, dict):
+                        child_pages.append(
+                            {
+                                "id": item.get("id"),
+                                "title": block_payload.get("title", ""),
+                                "page": page_payload,
+                            }
+                        )
+                if isinstance(block_payload, dict) and isinstance(block_payload.get("children"), list):
+                    walk(block_payload["children"])
+
+        walk(blocks)
+        return child_pages
+
     def get_page(
         self,
         page_id: str,
         return_markdown: bool = False,
         use_markdown_api: Optional[bool] = None,
         include_transcript: bool = False,
+        expand_child_pages: bool = True,
+        max_child_page_depth: int = 3,
         **kwargs: Any,
     ) -> Dict[str, Any]:
         """Retrieves the JSON of the page properties and an array of blocks on a Notion page given its page_id.
@@ -1348,6 +1477,9 @@ class NotionHelper:
                 `/v1/pages/{page_id}/markdown` endpoint by default. Set to False to force
                 legacy block retrieval plus local conversion.
             include_transcript (bool): Forwarded to the native markdown endpoint when used.
+            expand_child_pages (bool): When True, recursively calls get_page for child_page
+                blocks and embeds the result.
+            max_child_page_depth (int): Maximum recursion depth for child_page expansion.
             **kwargs: Deprecated aliases accepted for compatibility:
                 - returnmarkdown
                 - returnMarkdown
@@ -1387,8 +1519,19 @@ class NotionHelper:
             return_markdown = alias_value
 
         if kwargs:
-            unknown = ", ".join(sorted(kwargs.keys()))
-            raise TypeError(f"get_page() got unexpected keyword argument(s): {unknown}")
+            child_page_depth = int(kwargs.pop("_child_page_depth", 0))
+            visited_page_ids = kwargs.pop("_visited_page_ids", {page_id})
+            if not isinstance(visited_page_ids, set):
+                visited_page_ids = {page_id}
+            if kwargs:
+                unknown = ", ".join(sorted(kwargs.keys()))
+                raise TypeError(f"get_page() got unexpected keyword argument(s): {unknown}")
+        else:
+            child_page_depth = 0
+            visited_page_ids = {page_id}
+
+        if max_child_page_depth < 0:
+            raise ValueError("max_child_page_depth must be >= 0")
 
         if use_markdown_api is None:
             use_markdown_api = return_markdown
@@ -1398,6 +1541,7 @@ class NotionHelper:
         page = self._make_request("GET", page_url)
         properties = page.get("properties", {})
         prefetched_blocks_page: Optional[Dict[str, Any]] = None
+        native_markdown: Optional[str] = None
 
         if return_markdown and use_markdown_api:
             markdown_response = self.get_page_markdown(
@@ -1405,78 +1549,40 @@ class NotionHelper:
                 include_transcript=include_transcript,
             )
             if isinstance(markdown_response, dict) and "markdown" in markdown_response:
-                return {
-                    "properties": properties,
-                    "content": markdown_response.get("markdown", ""),
-                }
+                native_markdown = markdown_response.get("markdown", "")
             # Gracefully fall back to legacy block retrieval if callers/tests mock the
             # block endpoint shape while requesting markdown output.
-            if isinstance(markdown_response, dict) and "results" in markdown_response:
+            elif isinstance(markdown_response, dict) and "results" in markdown_response:
                 prefetched_blocks_page = markdown_response
 
-        # Retrieve the block data (content) with pagination
-        blocks_url = f"https://api.notion.com/v1/blocks/{page_id}/children"
-        content_blocks: List[Dict[str, Any]] = []
-        next_cursor = None if prefetched_blocks_page is None else prefetched_blocks_page.get("next_cursor")
-        first_iteration = True
-        while True:
-            if first_iteration and prefetched_blocks_page is not None:
-                blocks = prefetched_blocks_page
-            else:
-                params = {"page_size": 100}
-                if next_cursor:
-                    params["start_cursor"] = next_cursor
-                blocks = self._make_request("GET", blocks_url, params=params)
-            first_iteration = False
-            content_blocks.extend(blocks.get("results", []))
-            if not blocks.get("has_more"):
-                break
-            next_cursor = blocks.get("next_cursor")
-            if not next_cursor:
-                break
-
-        def hydrate_children(blocks: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
-            hydrated: List[Dict[str, Any]] = []
-            for block in blocks:
-                if not isinstance(block, dict):
-                    continue
-                if block.get("has_children") and block.get("id"):
-                    block_id = block["id"]
-                    child_url = f"https://api.notion.com/v1/blocks/{block_id}/children"
-                    children: List[Dict[str, Any]] = []
-                    child_cursor = None
-                    while True:
-                        child_params = {"page_size": 100}
-                        if child_cursor:
-                            child_params["start_cursor"] = child_cursor
-                        child_resp = self._make_request("GET", child_url, params=child_params)
-                        children.extend(child_resp.get("results", []))
-                        if not child_resp.get("has_more"):
-                            break
-                        child_cursor = child_resp.get("next_cursor")
-                        if not child_cursor:
-                            break
-
-                    children = hydrate_children(children)
-                    block_type = block.get("type")
-                    if isinstance(block_type, str):
-                        block_payload = block.get(block_type, {})
-                        if isinstance(block_payload, dict):
-                            block_payload["children"] = children
-                            block[block_type] = block_payload
-                hydrated.append(block)
-            return hydrated
-
-        content_blocks = hydrate_children(content_blocks)
+        content_blocks = self._get_page_blocks(page_id, prefetched_blocks_page=prefetched_blocks_page)
+        if expand_child_pages:
+            content_blocks = self._expand_child_pages(
+                content_blocks,
+                return_markdown=return_markdown,
+                use_markdown_api=use_markdown_api,
+                include_transcript=include_transcript,
+                max_child_page_depth=max_child_page_depth,
+                child_page_depth=child_page_depth,
+                visited_page_ids=visited_page_ids,
+            )
+        child_pages = self._collect_expanded_child_pages(content_blocks) if expand_child_pages else []
 
         # Convert to markdown if requested
         if return_markdown:
-            content = self._converter_adapter.blocks_to_markdown(content_blocks)
+            content = (
+                native_markdown
+                if native_markdown is not None
+                else self._converter_adapter.blocks_to_markdown(content_blocks)
+            )
         else:
             content = content_blocks
 
         # Return the properties JSON and blocks content
-        return {"properties": properties, "content": content}
+        result = {"properties": properties, "content": content}
+        if child_pages:
+            result["child_pages"] = child_pages
+        return result
 
     def create_database(self, parent_page_id: str, database_title: str, initial_data_source_properties: Dict[str, Any], initial_data_source_title: Optional[str] = None) -> Dict[str, Any]:
         """Creates a new database in Notion with an initial data source.
